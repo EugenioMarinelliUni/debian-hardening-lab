@@ -3,167 +3,243 @@ layout: default
 title: Corrections and Notes
 ---
 
-# Corrections, Caveats, and Improvements
+# Corrections and Operational Notes
 
-This page records important clarifications added while turning the original lab notes into a safer procedure.
+This page records caveats that matter when translating a hardening checklist into an executable procedure for `portal.fav.it`.
 
-## Account locking is not complete account disablement
+## 1. `passwd -l` does not necessarily disable an account completely
 
-`passwd -l user` locks password authentication, but should not be interpreted as disabling every possible authentication path. For a genuinely obsolete human account, also consider a non-login shell, account expiration, removal of privileged group memberships, and review of SSH authorized keys.
+`passwd -l USER` locks password authentication, but other authentication paths can still exist. For a genuinely obsolete human account, combine password locking with an expired account, a `nologin` shell and removal of unnecessary privileged group membership.
 
-Example:
+## 2. Do not lock root in this assignment
 
-```bash
-sudo passwd -l legacy
-sudo usermod -s /usr/sbin/nologin legacy
-sudo usermod --expiredate 1 legacy
-id legacy
+The final requirements explicitly need a valid root password for local-console recovery. Therefore the correct model is:
+
+```text
+root local-console password → remains valid
+root SSH login              → disabled
 ```
 
-## SSH drop-in order must be verified
+Use `PermitRootLogin no` for the network restriction rather than `passwd -l root`.
 
-Do not assume that a filename such as `90-hardening.conf` automatically overrides every earlier SSH setting. OpenSSH processes configuration according to its own precedence rules. Always confirm the effective result with:
+## 3. `AllowUsers sysadmin` is no longer sufficient
+
+SFTP is a subsystem of SSH and normally uses the same TCP/22 daemon. Because developers must connect as `webmaster`, a global allowlist must account for both identities, for example:
+
+```text
+AllowUsers sysadmin webmaster
+```
+
+Then restrict `webmaster` further with a `Match User webmaster` block and `ForceCommand internal-sftp`.
+
+## 4. Test SSH key access before disabling passwords
+
+Always establish and verify key-based `sysadmin` access in a **new** session before setting `PasswordAuthentication no`. Keep the existing administrative session open during SSH changes.
+
+The same principle applies to firewall changes: validate rules first, load them while a known-good session remains open, and test a second admin connection before closing the original session.
+
+## 5. OpenSSH drop-in ordering can be counterintuitive
+
+Do not assume a filename such as `90-hardening.conf` always overrides earlier files. OpenSSH uses first-obtained values for many scalar options and `Match` blocks can make effective values context-dependent.
+
+Always verify with:
 
 ```bash
 sudo sshd -T
 ```
 
-A deliberately early file such as `00-hardening.conf` may be appropriate for global defaults, but the effective configuration is the authority.
-
-## Always validate SSH before reload
-
-Use:
+and for user-specific rules:
 
 ```bash
-sudo sshd -t
+sudo sshd -T -C user=webmaster,host=portal.fav.it,addr=<CLIENT_IP>
 ```
 
-before:
+## 6. The self-signed certificate is deliberately retained
+
+For this exercise the existing self-signed certificate is considered acceptable and must not be replaced. Capture its SHA-256 fingerprint before web-server changes and compare it afterward.
+
+`curl -k` should be understood as a **lab-specific verification convenience** here. In normal production use, clients should validate a certificate chain against an appropriate trust anchor rather than disabling verification.
+
+## 7. Port 80 being open does not prove compliance
+
+The assignment permits HTTP only for redirection. Nmap can show that TCP/80 is open, but it cannot prove the application-level policy.
+
+Verify separately with:
 
 ```bash
-sudo systemctl reload ssh
+curl -sSI http://portal.fav.it/
 ```
 
-Keep the existing administrative session open and test a second session before closing the first.
+and confirm a `301` or `308` response pointing to the HTTPS URL.
 
-## Nmap SYN scans generally require privileges
+## 8. Port 443 must be added to the firewall model
 
-The original lab uses `nmap -sS`. On Linux, SYN scanning generally requires raw-packet privileges. Use:
+The older generic example allowed SSH and optionally HTTP. The portal role requires HTTPS, therefore TCP/443 must be permitted. TCP/80 remains permitted only because a redirect service is explicitly required.
+
+## 9. Restricting port 22 by source must account for developers too
+
+If nftables limits TCP/22 to a management subnet, remember that SFTP also uses TCP/22. Both administrator and developer source networks must be considered, otherwise the firewall may break required SFTP access even though the SSH server configuration is correct.
+
+## 10. Do not assume Apache or nginx
+
+The assignment requires HTTPS behavior, not a particular web server. Discover the active implementation first:
 
 ```bash
-sudo nmap -sS -sV <host>
+systemctl --type=service --state=running | grep -E 'apache2|nginx'
+sudo ss -lntp | grep -E ':(80|443)\b'
 ```
 
-or use a normal TCP connect scan when appropriate.
+Then use the correct syntax and validation command:
 
-## Separate file and directory permission changes
+```text
+nginx  → nginx -t
+Apache → apache2ctl configtest
+```
+
+## 11. Discover the real DocumentRoot before changing permissions
+
+Do not blindly assume `/var/www/html` or `/var/www/portal`. Inspect nginx/Apache configuration first, then construct the `webmaster` and web-server access policy around the actual application layout.
+
+## 12. Separate file modes from directory modes
 
 A command such as:
 
 ```bash
-chmod 0660 /srv/public-share/*
+chmod 0640 /some/tree/*
 ```
 
-can be unsafe if the wildcard includes directories, because directories require execute/traverse permission. Prefer separate operations:
+is unsafe if the wildcard includes directories because directories need execute/traverse permission.
+
+Prefer separate operations:
 
 ```bash
-sudo find /srv/public-share -type d -exec chmod 2770 {} +
-sudo find /srv/public-share -type f -exec chmod 0660 {} +
+find /some/tree -type d -exec chmod 2750 {} +
+find /some/tree -type f -exec chmod 0640 {} +
 ```
 
-Likewise for a read-mostly generic share:
+with modes adjusted to the actual application requirements.
+
+## 13. Be careful with SFTP chroot ownership
+
+If `ChrootDirectory` is used, OpenSSH requires strict ownership/permission conditions on the chroot root and its path components. A common safe design is that the chroot root is owned by root and not writable by `webmaster`, while a child directory contains writable portal content.
+
+Do not turn the whole chroot root over to `webmaster` just to make uploads convenient.
+
+## 14. Avoid shared private keys
+
+The assignment specifies one `webmaster` account, but the development team may contain multiple people. If that account must be shared, each developer should still have an individual public key in `authorized_keys` so access can be revoked per developer without redistributing a common private key.
+
+Where organizational requirements permit, distinct named developer accounts are even better for accountability.
+
+## 15. `nologin` and `ForceCommand internal-sftp` serve different purposes
+
+`/usr/sbin/nologin` expresses that the account is not intended to receive a conventional shell. `ForceCommand internal-sftp` is the SSH-side control that forces the authenticated remote session into SFTP. Use and verify the SSH restriction rather than relying on the shell field alone.
+
+## 16. Service removal is preferable to hardening an unnecessary service
+
+If FTP/TFTP or another daemon is not required by the portal role, disable/remove it instead of investing effort in securing a service that should not exist on the machine.
+
+Do not run every removal command blindly; first prove that the service/package is present and unnecessary.
+
+## 17. `apt purge` does not guarantee every application-created file disappears
+
+`apt purge PACKAGE` removes the package and package-managed configuration files, but service-created data, custom directories or administrator-created files can remain. Recheck sockets, processes, files and package state after removal.
+
+## 18. `nmap -sS` commonly requires elevated raw-packet privileges
+
+Use:
 
 ```bash
-sudo find /srv/company-share -type d -exec chmod 0750 {} +
-sudo find /srv/company-share -type f -exec chmod 0640 {} +
+sudo nmap -sS -sV ...
 ```
 
-## Protect the whole path of privileged scripts
+when performing a SYN scan in the authorized lab. An unprivileged TCP connect scan uses `-sT` instead.
 
-If root executes `/opt/labapp/bin/maintenance.sh`, protecting only the script file is not sufficient if a parent directory is writable by an untrusted user. Inspect the full path:
+## 19. Nmap and `ss` answer different questions
 
-```bash
-namei -l /opt/labapp/bin/maintenance.sh
-```
+`ss -lntup` is the host-local view of listeners. Nmap from another machine is the external reachability view. A service can listen locally while being blocked by a firewall, so both forms of evidence are useful.
 
-## Firewall syntax validation does not prevent lockout
-
-This command:
+## 20. The firewall syntax check cannot prove you will not lock yourself out
 
 ```bash
 sudo nft -c -f /etc/nftables.conf
 ```
 
-checks syntax but cannot determine whether the resulting policy will accidentally block your administrative network. Keep console/snapshot access available, retain the current SSH session, verify source networks, load the rules, and test a new SSH session immediately.
+checks syntax, not operational correctness. A syntactically valid rule can still block the administrator. Keep console access and an existing SSH session, then test a new connection immediately after loading the rules.
 
-## `rp_filter=1` is topology-dependent
+## 21. Do not blindly enable strict `rp_filter`
 
-Strict reverse-path filtering is suitable for many simple single-homed servers but can break legitimate traffic on hosts using asymmetric routing, multiple interfaces, VPNs, or policy routing. Treat it as a role-dependent setting rather than a universal requirement.
+`net.ipv4.conf.*.rp_filter = 1` can be suitable for a simple single-homed host, but can break legitimate traffic on multihomed, asymmetric-routing, VPN or policy-routing systems. Treat it as topology-dependent.
 
-## Password expiration policy is organization-dependent
+## 22. Password-age numbers are policy examples, not universal truths
 
-The example:
+A command such as:
 
 ```bash
-sudo chage -M 90 -m 1 -W 14 operator
+chage -M 90 -m 1 -W 14 USER
 ```
 
-is useful for demonstrating password-age controls, but a fixed 90-day rotation rule should not be treated as universally optimal. Follow current organizational, regulatory, and authentication-policy requirements.
+should be understood as an organizational example. Hardening should prioritize strong unique credentials, compromise response, appropriate MFA where possible, and the policy/regulatory context rather than assuming forced periodic rotation is always beneficial.
 
-## Deleting a secret does not invalidate it
+## 23. Deleting a plaintext secret is not the same as revoking it
 
-If a file contained an actual password, token, API key, or other credential, removing the file only removes one copy. Also revoke or rotate the credential and investigate whether additional copies exist in backups, logs, shares, or snapshots.
-
-## Samba security has multiple layers
-
-A successful Samba design depends on several distinct layers:
+If a password/token/private key has been exposed:
 
 ```text
-Unix user/group identity
-        ↓
-Samba authentication
-        ↓
-share-level authorization (`valid users`)
-        ↓
-Unix filesystem permissions
+remove exposed copy
+      ↓
+revoke/rotate credential
+      ↓
+search for additional copies
+      ↓
+review logs/use where appropriate
 ```
 
-`smbpasswd` does not replace Unix filesystem security.
+Deleting the file alone does not make a known credential unknown again.
 
-For modern deployments, also review whether SMB signing and SMB encryption are appropriate for the environment and clients.
+## 24. Audit persistence because the previous administrator is untrusted
 
-## Web services should use TLS when sensitive data is involved
+The assignment makes prior-administrator artifacts particularly relevant. At minimum review:
 
-The original lab focuses mainly on reducing directory listing and banner disclosure. For real applications carrying credentials, personal information, or sensitive data, add HTTPS/TLS and consider redirecting cleartext HTTP to HTTPS.
+- local accounts and groups;
+- SSH authorized keys;
+- sudoers fragments;
+- custom systemd units and drop-ins;
+- timers;
+- root/system cron jobs;
+- `/usr/local` and `/opt` custom executables/configuration.
 
-## Persistent logs need retention management
+Search results are clues, not proof of maliciousness. Inspect before removing.
 
-`Storage=persistent` improves troubleshooting and incident analysis, but persistent logs consume disk space. Define appropriate retention and disk-usage limits, and consider off-host/centralized logging for important systems.
+## 25. SUID/SGID and file capabilities are not automatically vulnerabilities
 
-## Automatic updates require policy review
+Commands such as:
 
-Enabling APT timers is not the whole policy. Also inspect:
+```bash
+find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls
+getcap -r / 2>/dev/null
+```
+
+are discovery tools. Many legitimate OS binaries require these mechanisms. Focus on unexpected/custom entries and compare them with the server role and package ownership.
+
+## 26. Logging should be bounded and, for higher assurance, exported
+
+Persistent journald improves local troubleshooting and incident evidence, but also creates disk-consumption and local-tampering considerations. Define sensible retention limits and consider remote/off-host logs for stronger production designs.
+
+## 27. Unattended-upgrades timers are not the whole policy
+
+Review both the scheduling mechanism and the policy controlling which origins/packages are accepted. In particular, inspect `/etc/apt/apt.conf.d/50unattended-upgrades` rather than assuming enabled timers mean the desired security updates are automatically applied.
+
+## 28. Verification must prove both security and continuity
+
+A configuration change is incomplete until both sides are demonstrated. For example:
 
 ```text
-/etc/apt/apt.conf.d/50unattended-upgrades
+sysadmin SSH works       + root SSH fails
+webmaster SFTP works     + webmaster shell fails
+HTTPS portal works       + HTTP only redirects
+certificate unchanged    + TLS service still works
+required ports reachable + unnecessary ports absent
 ```
 
-so you understand which repositories/origins and packages are actually eligible for unattended installation.
-
-## Useful additional audits
-
-The original labs can be extended with:
-
-- SUID/SGID file review
-- Linux file-capability review
-- ACL review with `getfacl`
-- `auditd` for security auditing
-- time synchronization verification
-- configuration-integrity tooling such as AIDE
-- `systemd-analyze security` for service sandboxing review
-- service-specific systemd restrictions such as `NoNewPrivileges`, `ProtectSystem`, and `PrivateTmp` where compatible
-- tested backup and restore procedures
-- remote/off-host logging
-- multifactor or hardware-backed SSH authentication where appropriate
-
-These are additions, not replacements for the role-based methodology used in the lab.
+That distinction is central to the final assignment.
