@@ -3,173 +3,247 @@ layout: default
 title: Final Verification Checklist
 ---
 
-# Final Verification Checklist
+# Final Verification Checklist — `portal.fav.it`
 
-Use this page after remediation to confirm that the intended controls are actually in effect.
+Use this checklist only after the remediation steps have been applied and validated.
 
-## System and baseline
+## System identity
 
-- [ ] Correct Debian host identified
-- [ ] Network addresses and routes documented
-- [ ] `assessment-before` saved
-- [ ] Initial external Nmap scan saved
-- [ ] Rollback/snapshot available
+- [ ] Hostname/FQDN is `portal.fav.it`
+- [ ] Debian 13 confirmed
+- [ ] Expected IP addressing and routing confirmed
+- [ ] `portal.fav.it` resolves to the intended address
 
-## Patch management
+Useful commands:
 
-- [ ] `sudo apt update` completed
-- [ ] `sudo apt full-upgrade` completed
-- [ ] Reboot performed if required
-- [ ] `apt list --upgradable` reviewed afterward
+```bash
+cat /etc/os-release
+hostnamectl
+hostname -f
+ip -br addr
+ip route
+getent hosts portal.fav.it
+```
 
-## Accounts and sudo
+## Evidence and rollback
 
-- [ ] Interactive accounts reviewed
-- [ ] Obsolete accounts locked/expired or removed according to policy
-- [ ] Obsolete accounts no longer have an interactive shell
-- [ ] Privileged group memberships reviewed
+- [ ] Initial snapshot/rollback point exists where applicable
+- [ ] Existing administrative session kept open during SSH/firewall changes
+- [ ] `~/hardening-evidence/before` captured
+- [ ] `~/hardening-evidence/after` captured
+- [ ] External `nmap-before.txt` captured
+- [ ] External `nmap-after.txt` captured
+- [ ] Each finding documents CHECK, significant OUTPUT, REMEDIATION and VERIFY
+
+## Previous-administrator review
+
+- [ ] Files/directories named after the previous administrator searched
+- [ ] Configuration contents searched for the previous administrator's name
+- [ ] Former-administrator account checked
+- [ ] Former-administrator sudo rights checked
+- [ ] SSH `authorized_keys` reviewed for unknown/old keys
+- [ ] Custom systemd units reviewed
+- [ ] Cron jobs reviewed
+- [ ] Timers reviewed
+- [ ] No suspicious artifact was deleted merely because of its name; each was evaluated first
+
+## Accounts and credentials
+
+- [ ] `sysadmin` password changed from the delivered known password
+- [ ] `sysadmin` public-key SSH tested successfully before password auth was disabled
+- [ ] Root retains a valid password for local-console access
+- [ ] Root local-console login verified
+- [ ] Root SSH login denied
+- [ ] Obsolete accounts locked/expired and stripped of unnecessary group membership
+- [ ] `webmaster` exists as the dedicated developer/SFTP account
+- [ ] `webmaster` does not receive an ordinary interactive shell
+
+## sudo
+
+- [ ] `getent group sudo` reviewed
 - [ ] `sudo -l` reviewed
 - [ ] Unnecessary `NOPASSWD: ALL` rules removed
-- [ ] Sudoers changes made with `visudo`
+- [ ] `sudoers` edited only with `visudo`
+- [ ] Remaining privileges are justified by role
 
-## SSH
+## SSH administration
 
-- [ ] Public-key login tested before disabling passwords
-- [ ] Current administrative session kept open during changes
+- [ ] `sudo sshd -t` succeeds
 - [ ] `PermitRootLogin no`
 - [ ] `PubkeyAuthentication yes`
-- [ ] `PasswordAuthentication no`
+- [ ] `PasswordAuthentication no` after key testing
 - [ ] `KbdInteractiveAuthentication no`
 - [ ] `PermitEmptyPasswords no`
-- [ ] `X11Forwarding no` if unused
-- [ ] `AllowTcpForwarding no` if unused
-- [ ] `GatewayPorts no`
 - [ ] `MaxAuthTries` reduced appropriately
-- [ ] `AllowUsers` or equivalent access restriction configured where appropriate
-- [ ] `sudo sshd -t` succeeds
-- [ ] `sudo sshd -T` confirms intended effective values
-- [ ] Normal administrative key login succeeds
-- [ ] Root SSH login fails
-- [ ] Password-only SSH login fails
+- [ ] `LoginGraceTime` reduced appropriately
+- [ ] `AllowUsers` includes both `sysadmin` and `webmaster`
+- [ ] `sysadmin` key-based SSH succeeds in a new session
+- [ ] `ssh root@portal.fav.it` fails
+- [ ] Password-only `sysadmin` authentication fails
 
-## Service minimization
+## SFTP for `webmaster`
+
+- [ ] `webmaster` authenticates by SSH key
+- [ ] `ForceCommand internal-sftp` applied to `webmaster`
+- [ ] `PermitTTY no` applied to `webmaster`
+- [ ] X11 forwarding disabled for `webmaster`
+- [ ] TCP forwarding disabled for `webmaster`
+- [ ] Agent forwarding disabled for `webmaster`
+- [ ] Password authentication disabled for `webmaster`
+- [ ] `sftp webmaster@portal.fav.it` succeeds
+- [ ] Upload/list/delete of a harmless test file succeeds
+- [ ] `ssh webmaster@portal.fav.it` does not provide a normal shell
+- [ ] Password-only SFTP test fails
+- [ ] If chroot is used, chroot root ownership and permissions satisfy OpenSSH requirements
+
+## Portal filesystem permissions
+
+- [ ] Actual portal DocumentRoot identified before changing ownership
+- [ ] Dedicated group such as `webcontent` created if used
+- [ ] `webmaster` has only the write access required to maintain portal content
+- [ ] Web-server account can read/traverse required portal content
+- [ ] Web-server account is not given unnecessary write access to the entire application tree
+- [ ] Directories and files use separate permission policies
+- [ ] Required runtime-writable directories are handled explicitly
+- [ ] Portal still functions after ownership/group changes
+
+## HTTPS certificate
+
+- [ ] Existing certificate path identified from the active web-server configuration
+- [ ] Certificate subject/issuer/dates inspected
+- [ ] SHA-256 fingerprint captured before changes
+- [ ] Same certificate fingerprint captured after changes
+- [ ] `diff` confirms the required self-signed certificate was not replaced
+- [ ] Live service on TCP/443 presents the expected certificate
+
+## HTTP / HTTPS behavior
+
+- [ ] Port 443 serves the portal over HTTPS
+- [ ] `curl -kI https://portal.fav.it/` returns a legitimate portal response
+- [ ] Port 80 does not directly serve portal content
+- [ ] `curl -sSI http://portal.fav.it/` returns 301/308 redirect
+- [ ] Redirect `Location` points to `https://portal.fav.it/...`
+- [ ] Redirect behavior verified for a non-root path as well
+- [ ] nginx `nginx -t` or Apache `apache2ctl configtest` succeeds, depending on active web server
+- [ ] Directory listing disabled unless explicitly required
+- [ ] Backup/archive material removed from public document root or otherwise protected
+- [ ] Unnecessary server-version disclosure reduced
+
+## Obsolete file-transfer services
+
+- [ ] FTP/TFTP listeners checked
+- [ ] FTP/TFTP packages checked
+- [ ] FTP/TFTP systemd services checked
+- [ ] Unnecessary FTP/TFTP daemons disabled and removed
+- [ ] SFTP remains functional on TCP/22
+
+Useful checks:
+
+```bash
+sudo ss -lntup | grep -E ':(20|21|69)\b'
+dpkg -l | grep -Ei 'vsftpd|proftpd|pure-ftpd|tftpd'
+```
+
+## General attack surface
 
 - [ ] `ss -lntup` reviewed
 - [ ] Running services reviewed
-- [ ] Installed service units reviewed
-- [ ] FTP removed if unnecessary
-- [ ] rpcbind removed if unnecessary
-- [ ] Web server removed if unnecessary
-- [ ] Only services justified by the server role remain
+- [ ] Enabled services reviewed
+- [ ] systemd timers reviewed
+- [ ] Custom systemd services reviewed
+- [ ] Cron jobs reviewed
+- [ ] Every remaining service has an explicit role justification
 
-## Web server
+## Filesystem and privilege review
 
-- [ ] nginx/Apache retained only if required
-- [ ] Directory indexes disabled unless explicitly required
-- [ ] Version/banner disclosure reduced where practical
-- [ ] Backups/archives removed from document root
-- [ ] Configuration validation succeeds
-- [ ] Sensitive paths return `403`/`404` rather than directory listings
-- [ ] HTTPS/TLS considered for any real application carrying credentials or sensitive data
-
-## Samba file server
-
-- [ ] `testparm -s` succeeds
-- [ ] Guest access disabled
-- [ ] Dedicated `fileshare` group exists
-- [ ] Authorized users are group members
-- [ ] Samba credentials exist only for required accounts
-- [ ] `valid users = @fileshare` configured
-- [ ] Share directory is not world-writable
-- [ ] Directories use appropriate group/traverse permissions
-- [ ] Files use appropriate group read/write permissions
-- [ ] Authenticated SMB access succeeds
-- [ ] Anonymous/guest SMB access fails
-- [ ] TCP/445 restricted to the authorized LAN where appropriate
-- [ ] TCP/139 is not exposed unless compatibility requires it
-
-## Filesystem and privileged scripts
-
-- [ ] World-writable directories reviewed rather than blindly changed
-- [ ] World-writable regular files reviewed
-- [ ] Shared directories have intentional owner/group assignments
-- [ ] Directory and file modes are applied separately
-- [ ] Privileged cron jobs reviewed
-- [ ] Scripts executed by root are not modifiable by untrusted users
-- [ ] Parent directories of privileged scripts reviewed (`namei -l`)
-- [ ] Unnecessary privileged scheduled jobs removed
-- [ ] Misplaced secrets removed or protected
-- [ ] Exposed real credentials rotated/revoked, not merely deleted from disk
+- [ ] World-writable directories reviewed
+- [ ] World-writable files reviewed
+- [ ] `/tmp` and `/var/tmp` not blindly modified
+- [ ] SUID/SGID executables reviewed
+- [ ] Linux file capabilities reviewed
+- [ ] Suspicious privileged scripts have safe ownership/modes
+- [ ] Parent directories of privileged scripts reviewed where relevant
+- [ ] Obvious plaintext secrets searched in authorized scope
+- [ ] Any real leaked credential was rotated/revoked, not merely deleted from a file
 
 ## nftables
 
-- [ ] Current rules reviewed before replacement
-- [ ] `input` default policy is `drop`
-- [ ] `forward` default policy is `drop` for a non-router
-- [ ] Loopback traffic allowed
-- [ ] `established,related` allowed
-- [ ] Invalid states dropped
+- [ ] nftables enabled
+- [ ] Input default policy is drop
+- [ ] Forward default policy is drop for this non-router role
+- [ ] Loopback permitted
+- [ ] Established/related traffic permitted
+- [ ] Invalid tracked traffic dropped
 - [ ] ICMP/ICMPv6 handled appropriately
-- [ ] Only required listening services allowed
-- [ ] SSH restricted to the management network where possible
-- [ ] SMB restricted to the authorized LAN where applicable
-- [ ] `sudo nft -c -f /etc/nftables.conf` succeeds before applying
-- [ ] Existing SSH/console recovery path kept available while applying firewall rules
-- [ ] New SSH session tested after firewall load
-- [ ] nftables enabled for boot persistence
+- [ ] TCP/22 permitted for required administrator/developer source networks
+- [ ] TCP/80 permitted for redirect service
+- [ ] TCP/443 permitted for HTTPS portal
+- [ ] No unnecessary application ports permitted
+- [ ] `sudo nft -c -f /etc/nftables.conf` succeeds before load
+- [ ] New SSH session tested after firewall application
+- [ ] New SFTP session tested after firewall application
 
 ## AppArmor
 
-- [ ] AppArmor service active
+- [ ] AppArmor active
 - [ ] AppArmor enabled at boot
-- [ ] `aa-status` reviewed
-- [ ] Relevant profiles loaded
-- [ ] Relevant profiles in enforce mode where tested and appropriate
-- [ ] Services function correctly after policy enforcement
-- [ ] Denials/errors reviewed in the journal
+- [ ] Relevant profiles reviewed
+- [ ] Relevant tested profiles in enforce mode where appropriate
+- [ ] Services tested after policy changes
+- [ ] AppArmor denials reviewed in the journal
 
 ## sysctl
 
-- [ ] `ip_forward=0` for a host that is not a router
-- [ ] ICMP redirect settings reviewed
-- [ ] Source routing disabled where appropriate
-- [ ] `rp_filter` chosen according to actual routing topology
-- [ ] SYN cookies enabled
-- [ ] `dmesg_restrict` enabled
-- [ ] `kptr_restrict` set appropriately
-- [ ] Protected hardlinks enabled
-- [ ] Protected symlinks enabled
-- [ ] Settings persisted under `/etc/sysctl.d/`
-- [ ] `sudo sysctl --system` succeeds
-- [ ] Runtime values verified after loading
+- [ ] `ip_forward` disabled because the host is not a router
+- [ ] unnecessary redirects disabled
+- [ ] source routing disabled
+- [ ] reverse-path policy chosen for actual topology rather than blindly copied
+- [ ] TCP SYN cookies enabled
+- [ ] kernel message disclosure restricted
+- [ ] kernel pointer disclosure restricted
+- [ ] hardlink/symlink protections enabled where appropriate
+- [ ] persistent sysctl file loaded successfully
 
 ## Logging
 
-- [ ] journald configured for persistent storage
+- [ ] journald persistent storage enabled
 - [ ] `/var/log/journal` exists
-- [ ] Journal disk usage reviewed
-- [ ] Previous boot logs remain available after reboot
-- [ ] SSH events are available
-- [ ] Firewall/AppArmor events are available
-- [ ] Samba/Apache/cron events are available where relevant
+- [ ] previous boot visible after controlled reboot
+- [ ] journal disk usage checked
+- [ ] SSH events available
+- [ ] firewall events/service state available
+- [ ] AppArmor events available
+- [ ] active web-server events available
 
-## Automatic updates
+## Updates
 
-- [ ] `unattended-upgrades` installed if required by policy
-- [ ] APT timers active
-- [ ] `/etc/apt/apt.conf.d/20auto-upgrades` configured
-- [ ] `/etc/apt/apt.conf.d/50unattended-upgrades` reviewed for actual policy
-- [ ] `systemctl list-timers | grep apt` reviewed
-- [ ] `unattended-upgrade --dry-run --debug` succeeds
+- [ ] Package index refreshed
+- [ ] Installed packages upgraded appropriately
+- [ ] `unattended-upgrades` installed/configured if required
+- [ ] APT timers enabled
+- [ ] `20auto-upgrades` reviewed
+- [ ] `50unattended-upgrades` reviewed
+- [ ] unattended-upgrades dry run completed successfully
 
-## Final evidence
+## Final external state
 
-- [ ] `assessment-after` saved
-- [ ] Final external Nmap scan saved
-- [ ] Before/after listeners compared
-- [ ] Before/after services compared
-- [ ] Before/after firewall rules compared
-- [ ] Before/after SSH effective configuration compared
-- [ ] Before/after AppArmor state compared
-- [ ] Before/after Samba configuration compared where applicable
-- [ ] Final externally reachable services match the documented server role
+Run from an authorized assessment host:
+
+```bash
+sudo nmap -sS -sV -p- portal.fav.it -oN nmap-after.txt
+```
+
+Expected required TCP exposure:
+
+```text
+22/tcp   SSH / SFTP
+80/tcp   HTTP redirect only
+443/tcp  HTTPS portal
+```
+
+- [ ] Any additional exposed port has a documented business/technical justification
+- [ ] HTTP redirect checked independently with `curl`
+- [ ] HTTPS response checked independently with `curl`
+- [ ] Required SFTP functionality tested independently
+- [ ] Required administrative SSH functionality tested independently
+- [ ] Before/after evidence compared and included in the final report
