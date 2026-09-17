@@ -3,329 +3,399 @@ layout: default
 title: Command Reference
 ---
 
-# Command Reference
+# Command Reference for `portal.fav.it`
 
-This page explains the main commands used by the hardening procedure.
+This page explains the main commands used by the revised hardening procedure.
 
-## System identification
+## Evidence and shell recording
+
+### `mkdir -p ~/hardening-evidence/{before,after}`
+Creates the evidence directory tree. `-p` creates missing parent directories and avoids failing if they already exist. Brace expansion creates both `before` and `after` subdirectories.
+
+### `script -a FILE`
+Records an interactive terminal session to a file. `-a` appends rather than overwriting an existing log.
+
+### `tee FILE`
+Copies standard input both to the terminal and to a file, useful when an assessment command must remain visible while also being captured as evidence.
+
+## System identity and networking
 
 ### `cat /etc/os-release`
-Prints the distribution identification file. Use it to confirm the OS and release before applying distribution-specific procedures.
+Prints Debian distribution/version metadata.
 
 ### `uname -a`
-Shows kernel, architecture, hostname, and related system information.
+Displays kernel, architecture and related system information.
 
 ### `hostnamectl`
-Shows hostname and system metadata managed through systemd.
+Shows systemd-managed hostname information and can change the persistent hostname.
 
-### `ip addr`
-Shows network interfaces and assigned IP addresses.
+### `hostname -f`
+Attempts to display the fully qualified domain name (FQDN).
+
+### `ip -br addr`
+Shows interface/address information in compact form. `-br` means brief.
 
 ### `ip route`
-Shows the kernel routing table, including directly connected networks and the default gateway.
+Displays the kernel routing table and default gateway.
 
-## Files and directories
+### `getent hosts portal.fav.it`
+Queries the system name-service configuration to show how the hostname resolves.
 
-### `mkdir -p <path>`
-Creates a directory. `-p` creates missing parents and does not fail merely because the directory already exists.
-
-### `ls -l`
-Long listing including permissions, owner, group, size, and timestamps.
-
-### `ls -ld <directory>`
-Shows metadata about the directory itself rather than listing its contents.
-
-### `stat <path>`
-Shows detailed filesystem metadata.
-
-### `find`
-Searches directory trees using predicates such as object type and permissions.
-
-Example:
-
-```bash
-sudo find / -xdev -type f -perm -0002 2>/dev/null
-```
-
-means: search `/`, stay on the same filesystem, select regular files that are world-writable, and discard error messages.
-
-### `chown`
-Changes file or directory ownership.
-
-```bash
-sudo chown -R root:fileshare /srv/public-share
-```
-
-sets owner `root`, group `fileshare`, recursively.
-
-### `chmod`
-Changes Unix permission bits.
-
-Common modes in the lab:
-
-- `0700` — owner `rwx`, nobody else any permission
-- `0600` — owner `rw`, nobody else any permission
-- `0750` — owner `rwx`, group `r-x`, others none
-- `0640` — owner `rw`, group `r`, others none
-- `2770` — owner/group `rwx`, others none, SGID on directory
-- `0660` — owner/group `rw`, others none
-
-## Redirection and shell operators
-
-### `>`
-Redirects standard output to a file, replacing that file.
-
-### `2>/dev/null`
-Redirects standard error to `/dev/null`, effectively hiding it.
-
-### `2>&1`
-Redirects standard error to the same destination as standard output.
-
-### `|`
-Pipes the standard output of one command into the standard input of another.
-
-### `|| true`
-If the command on the left fails, run `true`, which exits successfully. Used when a failure is intentionally non-fatal.
-
-## Processes, services, and sockets
+## Processes, services and sockets
 
 ### `ss -lntup`
-Shows listening TCP and UDP sockets.
+Shows listening network sockets.
 
-Options:
-
-- `-l` listening
-- `-n` numeric addresses and ports
-- `-t` TCP
-- `-u` UDP
-- `-p` associated process
+- `-l`: listening
+- `-n`: numeric addresses/ports
+- `-t`: TCP
+- `-u`: UDP
+- `-p`: associated process
 
 ### `systemctl --type=service --state=running`
-Lists systemd services currently in the running state.
+Lists running systemd services.
 
-### `systemctl list-unit-files --type=service`
-Lists service unit definitions and their enablement state.
+### `systemctl list-unit-files --state=enabled`
+Shows service/unit definitions configured to be enabled at boot or through dependencies.
 
-### `systemctl status <unit>`
-Shows current unit state and recent status information.
+### `systemctl list-timers --all`
+Lists systemd timers, including inactive ones, and their schedules.
 
-### `systemctl enable --now <unit>`
-Enables the unit for future startup and starts it immediately.
+### `systemctl disable --now SERVICE`
+Stops a service now and disables normal automatic startup. It does not remove the package.
 
-### `systemctl disable --now <unit>`
-Disables automatic startup and stops the unit immediately.
+### `systemctl enable --now SERVICE`
+Starts a unit now and enables its configured startup behavior.
 
-### `systemctl reload <unit>`
-Asks a running service to reload configuration without a full restart, if supported.
+### `systemctl reload SERVICE`
+Asks a running service to reread its configuration where supported without a full stop/start.
 
-### `systemctl restart <unit>`
-Stops and starts the service again.
+### `systemctl restart SERVICE`
+Stops and starts a service, creating new processes with updated environment/group membership.
 
-### `systemctl mask <unit>` / `unmask`
-A mask prevents a unit from being started through normal systemd dependency or manual operations. `unmask` removes that block.
+## Searching suspicious artifacts
 
-## Package management
+### `find PATHS -iname '*asdrubale*' -ls`
+Searches names case-insensitively for files/directories whose names contain the previous administrator's name. `-ls` prints metadata.
 
-### `apt list --upgradable`
-Shows installed packages for which APT currently knows about an upgrade.
+### `grep -RniI PATTERN PATHS`
+Recursively searches text files.
 
-### `sudo apt update`
-Refreshes repository/package metadata. It does not itself upgrade installed packages.
+- `-R`: recurse
+- `-n`: line numbers
+- `-i`: case-insensitive
+- `-I`: skip binary files
 
-### `sudo apt full-upgrade`
-Upgrades packages and is allowed to resolve dependency transitions that may install or remove packages.
+### `systemctl cat UNIT`
+Shows the complete systemd unit definition and drop-ins used for a service.
 
-### `sudo apt purge <package>`
-Removes a package and its package-managed configuration files.
+### `stat PATH`
+Displays detailed filesystem metadata including permissions, owner, timestamps and inode information.
 
-### `dpkg -l <package>`
-Queries Debian's installed-package database.
+### `less FILE`
+Safely views a text file interactively without editing it.
 
-## User and group management
+## Users, accounts and groups
 
 ### `getent passwd`
-Queries the system account database.
+Queries the configured user database.
 
-### `getent group <group>`
-Queries a group from the group database.
+### `awk -F: '$7 !~ /(nologin|false)$/ {print $1,$6,$7}' /etc/passwd`
+Uses `:` as field separator and prints username, home directory and shell for accounts whose shell does not end in `nologin` or `false`.
 
-### `id <user>`
-Shows UID, primary GID, and supplementary group memberships.
+### `id USER`
+Shows UID, primary GID and supplementary groups for a user.
 
-### `passwd -l <user>`
-Locks the password for the account. This should not be interpreted as disabling every possible authentication method by itself.
+### `passwd -S USER`
+Shows password-account status.
 
-### `passwd -S <user>`
-Shows password/account password-state information.
+### `passwd -l USER`
+Locks password authentication for an account. It does not necessarily disable every possible authentication mechanism by itself.
 
-### `usermod -s /usr/sbin/nologin <user>`
-Sets the login shell to `nologin`, preventing ordinary interactive shell login.
+### `usermod -s /usr/sbin/nologin USER`
+Changes the login shell to `nologin`, preventing ordinary interactive shell login.
 
-### `usermod --expiredate 1 <user>`
-Expires the account.
+### `usermod --expiredate 1 USER`
+Sets an account-expiry date in the past, providing stronger account disablement for an obsolete account.
 
-### `groupadd -f <group>`
-Creates a group; `-f` makes an already-existing group non-fatal.
+### `gpasswd -d USER GROUP`
+Removes a user from a group, for example removing an obsolete account from `sudo`.
 
-### `usermod -aG <group> <user>`
-Appends the user to a supplementary group. `-a` is important because it preserves existing supplementary groups.
+### `chage -l USER`
+Displays password-age and account-expiry information.
 
-### `chage -l <user>`
-Lists password-aging policy for the account.
+### `useradd -m -s /usr/sbin/nologin webmaster`
+Creates the dedicated SFTP account, creates its home directory (`-m`), and assigns `nologin` as its ordinary shell.
+
+### `usermod -aG GROUP USER`
+Adds a user to a supplementary group. `-a` is important because it appends rather than replacing all existing supplementary memberships.
 
 ## sudo
 
 ### `sudo -l`
-Shows the sudo permissions available to the current user.
+Lists sudo permissions for the current user.
+
+### `sudo -l -U USER`
+Lists sudo privileges associated with another user when permitted.
 
 ### `visudo`
-Safely edits sudoers configuration and validates syntax.
+Edits sudo configuration with syntax validation. Prefer it to a normal text editor for `/etc/sudoers` and files in `/etc/sudoers.d`.
 
-```bash
-sudo visudo -f /etc/sudoers.d/example
-```
-
-edits a specific sudoers fragment.
-
-## SSH
+## SSH keys and authorized keys
 
 ### `ssh-keygen -t ed25519`
-Creates an Ed25519 SSH public/private key pair.
+Creates an Ed25519 public/private SSH key pair.
 
-### `ssh-copy-id user@host`
-Installs the local public key into the remote user's SSH authorized-keys setup.
+### `ssh-copy-id USER@HOST`
+Copies the current user's public key into the target account's SSH authorization file.
 
-### `ssh user@host`
-Starts an SSH connection.
+### `authorized_keys`
+Usually `~/.ssh/authorized_keys`; contains public keys allowed to authenticate as that account. Unknown keys inherited from a former administrator are a significant finding and should be investigated.
 
-### `sshd -T`
-Prints the effective SSH server configuration after configuration processing.
+### `nl -ba FILE`
+Prints a file with line numbers, including blank lines (`-b a`), useful when documenting exactly which authorized key is present.
+
+## SSH server validation and policy
 
 ### `sshd -t`
-Validates SSH server configuration syntax without starting a new daemon.
+Checks SSH server configuration syntax. Run it before reloading the daemon.
 
-### `ssh -o PubkeyAuthentication=no ...`
-Overrides a client option for one invocation. In the lab it is used as a negative test to verify that password-only access no longer works.
+### `sshd -T`
+Prints effective OpenSSH server configuration.
 
-## Text-processing commands
+### `sshd -T -C user=...,host=...,addr=...`
+Evaluates effective settings for a specific connection context and is particularly useful for `Match User webmaster` rules.
 
-### `grep`
-Searches text for matching lines.
+### `PermitRootLogin no`
+Disables root login over SSH while still allowing a valid root password to remain for local-console access.
 
-Useful options:
+### `AllowUsers sysadmin webmaster`
+Restricts SSH authentication to the required administration and SFTP identities. Omitting `webmaster` would also block SFTP because SFTP runs through SSH.
 
-- `-R` recursive
-- `-n` print line numbers
-- `-i` case-insensitive
-- `-E` extended regular expressions
+### `ForceCommand internal-sftp`
+Forces the matched account into OpenSSH's internal SFTP subsystem rather than a normal shell.
 
-### `awk`
-Processes structured text by fields.
+### `PermitTTY no`
+Prevents allocation of an interactive terminal for the matched account.
 
-Example:
+### `AllowTcpForwarding no`, `AllowAgentForwarding no`, `X11Forwarding no`, `GatewayPorts no`
+Disable SSH capabilities not required for a restricted SFTP account.
 
-```bash
-awk -F: '$7 !~ /(nologin|false)$/ {print $1,$6,$7}' /etc/passwd
+### `ChrootDirectory PATH`
+Confines a matched SSH/SFTP session to a subtree. The chroot root must satisfy OpenSSH ownership/permission requirements and must not be writable by the restricted user.
+
+## SFTP
+
+### `sftp webmaster@portal.fav.it`
+Starts an SFTP session over SSH, normally using TCP/22.
+
+Useful interactive commands include:
+
+```text
+pwd
+ls
+put FILE
+get FILE
+rm FILE
+bye
 ```
 
-uses `:` as the field delimiter and prints username, home directory, and shell for accounts whose shell does not end in `nologin` or `false`.
+### `sftp -o PubkeyAuthentication=no webmaster@portal.fav.it`
+Negative test that disables the client's use of public-key authentication. After password authentication is disabled, this should fail.
 
-## Network scanning and HTTP testing
+### `ssh webmaster@portal.fav.it`
+Negative test: if `webmaster` is correctly constrained to SFTP, it should not receive a normal interactive shell.
 
-### `nmap -sS -sV <host>`
-Performs a SYN scan and service/version detection. A SYN scan generally requires appropriate raw-packet privileges, so the examples use `sudo`.
+## Filesystem ownership and permissions
 
-### `nmap -p21 <host>`
-Tests a specific port.
+### `chown -R OWNER:GROUP PATH`
+Recursively changes owner/group. Use with care and only after identifying the correct application layout.
 
-### `curl -I URL`
-Fetches HTTP headers only.
+### `chmod 0700 DIRECTORY`
+Owner has read/write/execute; group and others have no permissions.
 
-### `curl URL`
-Fetches the response body and is useful for verifying whether a directory or resource is actually accessible.
+### `chmod 0600 FILE`
+Owner has read/write; group and others have no permissions.
 
-## Web servers
+### `chmod 2750 DIRECTORY`
+Owner `rwx`, group `r-x`, others none, plus SGID so new objects tend to inherit the directory group.
+
+### `chmod 0640 FILE`
+Owner read/write, group read, others none.
+
+### `find PATH -type d -exec chmod 2750 {} +`
+Applies a directory-specific mode recursively without mistakenly removing traversal bits from directories.
+
+### `find PATH -type f -exec chmod 0640 {} +`
+Applies a file-specific mode separately.
+
+### `namei -l PATH`
+Displays ownership and permissions for every component in a path, useful when assessing privileged scripts or chroot paths.
+
+## Web-server discovery
 
 ### `nginx -T`
-Tests and dumps the effective nginx configuration.
-
-### `nginx -t`
-Tests nginx configuration syntax.
+Tests and dumps nginx's interpreted configuration. Useful for locating `server_name`, `root`, `listen`, and TLS certificate directives.
 
 ### `apache2ctl -S`
-Displays Apache virtual-host interpretation.
+Shows Apache virtual-host interpretation and configuration sources.
+
+### `grep -RniE 'DocumentRoot|VirtualHost|SSLEngine|SSLCertificate' /etc/apache2/...`
+Locates Apache document roots, virtual hosts and TLS configuration.
+
+## TLS / HTTPS
+
+### `openssl x509 -in CERT -noout ...`
+Parses a certificate file without modifying it. Useful options include:
+
+- `-subject`: subject identity
+- `-issuer`: issuing identity
+- `-serial`: certificate serial number
+- `-dates`: validity window
+- `-fingerprint -sha256`: stable SHA-256 fingerprint for before/after comparison
+
+### `openssl s_client -connect portal.fav.it:443 -servername portal.fav.it`
+Opens a TLS connection and uses SNI for `portal.fav.it`. Piping its output to `openssl x509` shows the certificate the live server actually presents.
+
+### `curl -I URL`
+Requests response headers only.
+
+### `curl -kI https://portal.fav.it/`
+Tests HTTPS while ignoring certificate-chain trust errors. `-k` is appropriate here only because the exercise explicitly requires retaining the self-signed certificate.
+
+### `curl -sSI http://portal.fav.it/`
+Silently fetches HTTP response headers and is useful for proving that port 80 returns a redirect rather than portal content.
+
+### `curl -kIL http://portal.fav.it/`
+Follows redirects (`-L`) and allows the intentionally self-signed HTTPS endpoint (`-k`) so the complete HTTP→HTTPS flow can be demonstrated.
+
+### `diff BEFORE AFTER`
+Compares two text files. If the stored certificate fingerprint files are identical, `diff` normally prints nothing.
+
+## nginx HTTP redirect
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+    server_name portal.fav.it;
+    return 301 https://$host$request_uri;
+}
+```
+
+This ensures port 80 redirects rather than serving application content.
+
+### `nginx -t`
+Validates nginx configuration syntax before reload.
+
+## Apache HTTP redirect
+
+```apache
+<VirtualHost *:80>
+    ServerName portal.fav.it
+    Redirect permanent / https://portal.fav.it/
+</VirtualHost>
+```
 
 ### `apache2ctl configtest`
-Validates Apache configuration syntax.
+Validates Apache configuration before reload.
 
-## Samba
+## Package management and obsolete protocols
 
-### `testparm -s`
-Parses and validates Samba configuration and prints interpreted settings.
+### `apt update`
+Refreshes local package metadata.
 
-### `smbclient -L localhost -N`
-Lists local SMB shares without supplying a password; useful for guest-access testing.
+### `apt full-upgrade`
+Upgrades installed packages while allowing necessary dependency transitions.
 
-### `smbclient //server/share -U user`
-Connects to an SMB share as the specified user.
+### `apt purge PACKAGE`
+Removes a Debian package and package-managed configuration files. It does not guarantee removal of every data file the application may have created.
 
-### `smbpasswd -a <user>`
-Adds/enables Samba credentials for an existing Unix account.
+### `dpkg -l | grep -Ei 'vsftpd|proftpd|pure-ftpd|tftpd'`
+Searches installed package metadata for common FTP/TFTP servers.
+
+### `ss -lntup | grep -E ':(20|21|69)\b'`
+Checks for listeners on common FTP/TFTP ports. Port 69 is normally UDP/TFTP.
 
 ## nftables
 
 ### `nft list ruleset`
-Shows the active nftables ruleset.
+Displays the active nftables ruleset.
 
 ### `nft -c -f /etc/nftables.conf`
-Checks a rules file for validity without loading it.
+Parses/checks the configuration without applying it.
 
 ### `nft -f /etc/nftables.conf`
-Loads the rules from the file into the active ruleset.
+Loads the configuration and immediately changes packet filtering.
 
-Important nftables concepts used in the lab:
+For this portal, the required TCP services are normally:
 
-- `policy drop` — deny packets that do not match an allow rule
-- `iifname "lo" accept` — allow loopback traffic
-- `ct state established,related accept` — allow packets belonging to accepted flows
-- `ct state invalid drop` — discard invalid tracked traffic
-- `tcp dport 22 accept` — allow TCP destination port 22
-- `ip saddr 10.10.10.0/24 ...` — restrict a rule to a source subnet
+```text
+22  SSH + SFTP
+80  HTTP redirect
+443 HTTPS portal
+```
+
+If TCP/22 is source-restricted, both the administrator and developer source networks must be accounted for.
+
+## External validation
+
+### `nmap -sS -sV -p- portal.fav.it`
+Performs an authorized TCP SYN scan of all TCP ports (`-p-`) and service/version detection (`-sV`). A SYN scan commonly needs elevated raw-packet privileges, hence `sudo` in the guide.
+
+A focused final check can use:
+
+```bash
+sudo nmap -sS -sV -p22,80,443 portal.fav.it
+```
+
+## Privilege audits
+
+### `find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls`
+Lists SUID and SGID executables on the filesystem. These are not automatically vulnerabilities; investigate unexpected/custom entries.
+
+### `getcap -r / 2>/dev/null`
+Recursively displays Linux file capabilities. Capabilities can grant specific privileged operations without a full SUID-root executable.
 
 ## AppArmor
 
 ### `aa-status`
-Shows AppArmor status, loaded profiles, enforcement state, and confinement information.
+Displays AppArmor state, loaded profiles, enforcement/complain modes and confinement information.
 
-### `aa-enforce <profile>`
-Switches a profile into enforcement mode.
+### `aa-enforce PROFILE`
+Moves a profile to enforcement mode. Do this only after confirming the profile is appropriate for the service.
 
 ## sysctl
 
-### `sysctl <parameter>`
+### `sysctl NAME`
 Reads a kernel runtime parameter.
 
 ### `sysctl --system`
-Loads persistent sysctl configuration from the standard sysctl configuration locations.
+Loads persistent sysctl configuration from system configuration locations such as `/etc/sysctl.d`.
 
-## Logging
+Strict reverse-path filtering (`rp_filter=1`) can be inappropriate for multihomed, VPN, asymmetric-routing or policy-routing systems.
+
+## Journald
 
 ### `journalctl --list-boots`
-Lists boot sessions retained in the journal.
+Lists boot sessions represented in the journal and helps demonstrate persistence across reboot.
 
-### `journalctl -u <unit>`
-Shows journal entries associated with a specific systemd unit.
+### `journalctl -u UNIT`
+Shows journal messages associated with a systemd unit.
 
 ### `journalctl --disk-usage`
-Shows current journal storage usage.
+Reports journal storage usage.
 
 ### `systemd-analyze cat-config systemd/journald.conf`
-Displays journald's merged/effective configuration, including drop-ins.
+Shows the effective journald configuration including drop-ins.
 
 ## Automatic updates
 
-### `systemctl list-timers`
-Lists systemd timers and their scheduling state.
+### `dpkg -l unattended-upgrades`
+Checks whether the package is installed.
+
+### `systemctl list-timers | grep apt`
+Shows APT-related systemd timers.
 
 ### `unattended-upgrade --dry-run --debug`
-Simulates unattended-upgrade decisions without installing packages and emits detailed diagnostic output.
+Simulates unattended-upgrade behavior while printing detailed decisions.
