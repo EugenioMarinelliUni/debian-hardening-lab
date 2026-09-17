@@ -1,63 +1,56 @@
 ---
 layout: default
-title: Debian 13 Hardening Lab
+title: Debian 13 Hardening Lab — portal.fav.it
 ---
 
-# Debian 13 Hardening Lab
+# Debian 13 Hardening Lab — `portal.fav.it`
 
-This site presents a practical, bottom-up hardening workflow for Debian 13 servers. It combines two lab scenarios: a general server exposing SSH, nginx, FTP and rpcbind, and a file/collaboration server exposing SSH, Apache and Samba.
+This site documents a production-oriented hardening exercise for a Debian 13 server hosting the company portal `portal.fav.it`.
 
-The central method is:
+## Required services
+
+| Port | Service | Final purpose |
+|---|---|---|
+| 22/tcp | SSH / SFTP | SSH administration for `sysadmin`; SFTP-only access for `webmaster` |
+| 80/tcp | HTTP | Redirect only to HTTPS |
+| 443/tcp | HTTPS | Company portal |
+
+Everything else should be justified by the server role or removed/disabled.
+
+## Identity and access requirements
+
+- `sysadmin`: administrative SSH access; known password must be changed; public-key SSH preferred/required after keys are tested.
+- `webmaster`: dedicated developer account; SFTP only; no ordinary interactive shell.
+- `root`: valid password retained for local-console recovery; direct SSH login disabled.
+- Previous-administrator artifacts: investigate unknown accounts, SSH keys, cron jobs, systemd units, sudo rules and configuration fragments before trusting them.
+
+## Web requirements
+
+- Preserve the already installed self-signed certificate for this exercise.
+- HTTPS must work on 443.
+- HTTP on 80 must return only a redirect to HTTPS.
+- Do not expose backup/archive directories through the document root.
+
+## Recommended reading order
+
+1. [Complete procedure](guide.md)
+2. [Command reference](command-reference.md)
+3. [Final verification checklist](checklist.md)
+4. [Evidence/report template](evidence-template.md)
+5. [Corrections and operational notes](corrections-and-notes.md)
+
+## Core methodology
 
 ```text
-TARGET / ROLE
-    ↓
 CHECK / EVIDENCE
-    ↓
-RISK
-    ↓
-CORRECTIVE ACTION
-    ↓
-VERIFICATION
+       ↓
+RISK / ROLE DECISION
+       ↓
+REMEDIATION
+       ↓
+VALIDATION
+       ↓
+FUNCTIONAL + SECURITY VERIFICATION
 ```
 
-The goal is not to apply every possible hardening control indiscriminately. For each component, first ask whether it is needed. If it is not needed, remove or disable it. If it is needed, reduce privileges, reduce exposure, apply restrictive policy, log relevant events, and verify the result.
-
-## Start here
-
-- [Complete hardening procedure](guide.md)
-- [Command reference](command-reference.md)
-- [Final verification checklist](checklist.md)
-- [Corrections, caveats, and improvements](corrections-and-notes.md)
-
-## Defense in depth
-
-A hardened server should rely on multiple complementary controls:
-
-```text
-network firewall / segmentation
-        +
-host nftables
-        +
-SSH hardening
-        +
-account and sudo security
-        +
-service-specific authorization
-        +
-filesystem permissions
-        +
-AppArmor
-        +
-sysctl hardening
-        +
-persistent logging
-        +
-patch management
-```
-
-No single control is sufficient on its own.
-
-## Safety note
-
-Run these procedures only on systems you administer or are authorized to modify. Commands affecting SSH, nftables, packages, filesystems, authentication, or kernel parameters can break access or services if applied incorrectly. Keep console or VM snapshot access available and adapt all addresses, usernames, paths, and service choices to your own environment.
+A successful hardening action is not merely a changed configuration file. It must also demonstrate that the required service still functions and that the prohibited behavior now fails.
