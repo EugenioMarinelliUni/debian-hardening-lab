@@ -5,9 +5,11 @@ title: Complete Hardening Procedure
 
 # Complete Debian 13 Hardening Procedure for `portal.fav.it`
 
-This procedure is tailored to the final assignment: a Debian 13 server hosting the company portal `portal.fav.it`.
+This is the main operational procedure for the final assignment. Follow it in order. Commands that only inspect the system come before commands that modify it.
 
-## 1. Preserve recoverability
+> **Rule for placeholders:** never guess a path, IP address, subnet, account, or service name. Discover the real value first, record it, and only then substitute it into a remediation command.
+
+## 1. Preserve recoverability and start collecting evidence
 
 Before touching SSH, firewall rules, authentication, filesystem ownership or kernel parameters:
 
@@ -22,13 +24,13 @@ mkdir -p ~/hardening-evidence/{before,after}
 script -a ~/hardening-evidence/hardening-session.log
 ```
 
-Exit `script` recording later with:
+`script` records the terminal session. Exit the recording at the end with:
 
 ```bash
 exit
 ```
 
-## 2. Confirm identity and networking
+## 2. Confirm system identity and basic networking
 
 ```bash
 cat /etc/os-release
@@ -36,9 +38,9 @@ uname -a
 hostnamectl
 hostname
 hostname -f
-ip -br addr
+ip -br -4 addr
 ip route
-getent hosts portal.fav.it
+getent ahostsv4 portal.fav.it
 ```
 
 The intended FQDN is:
@@ -53,13 +55,15 @@ If the configured hostname is wrong:
 sudo hostnamectl set-hostname portal.fav.it
 ```
 
-Inspect `/etc/hosts` before modifying local name resolution:
+Inspect local name resolution before modifying it:
 
 ```bash
 cat /etc/hosts
 ```
 
-## 3. Capture the baseline
+Do not assume that an address returned for `portal.fav.it` is necessarily the local interface address. Compare DNS/name-resolution output with `ip -br -4 addr`; NAT, a reverse proxy, or a load balancer can make them differ.
+
+## 3. Capture the original baseline before remediation
 
 ```bash
 ss -lntup | tee ~/hardening-evidence/before/listening-sockets.txt
@@ -80,9 +84,188 @@ sudo nmap -sS -sV -p- portal.fav.it \
   -oN nmap-before.txt
 ```
 
-The local `ss` view shows listening sockets. The external Nmap view shows what another host can reach.
+The local `ss` view shows listening sockets. The external Nmap view shows what another host can actually reach.
 
-## 4. Investigate artifacts from the previous administrator
+## 4. Discover and record the real environment values
+
+This step supplies the values used later in the guide.
+
+### 4.1 Server IP, interface, gateway and locally connected subnet
+
+```bash
+ip -br -4 addr
+ip -4 route
+```
+
+Typical output might resemble:
+
+```text
+ens33            UP             10.10.10.30/24
+
+default via 10.10.10.1 dev ens33
+10.10.10.0/24 dev ens33 proto kernel scope link src 10.10.10.30
+```
+
+From that example only:
+
+```text
+SERVER_IP     = 10.10.10.30
+SERVER_SUBNET = 10.10.10.0/24
+GATEWAY       = 10.10.10.1
+INTERFACE     = ens33
+```
+
+Use your actual output, not these example values.
+
+Verify the portal name separately:
+
+```bash
+getent ahostsv4 portal.fav.it
+```
+
+### 4.2 Current administrator client IP
+
+If you are connected over SSH:
+
+```bash
+printf '%s\n' "$SSH_CONNECTION"
+who
+w
+```
+
+`SSH_CONNECTION` normally contains:
+
+```text
+client_IP client_source_port server_IP server_port
+```
+
+Extract the current SSH client address for convenience:
+
+```bash
+ADMIN_IP=$(printf '%s\n' "$SSH_CONNECTION" | awk '{print $1}')
+printf 'ADMIN_IP=%s\n' "$ADMIN_IP"
+```
+
+If you are working from the local console, `SSH_CONNECTION` can be empty; do not treat an empty value as an error.
+
+### 4.3 Administrator subnet
+
+Do **not** infer a subnet such as `/24` merely from one administrator IP. Inspect routing information:
+
+```bash
+ip -4 route show table all
+```
+
+If `ADMIN_IP` is known, inspect the route the server would use to reach it:
+
+```bash
+ip route get "$ADMIN_IP"
+```
+
+An explicit route such as:
+
+```text
+192.168.50.0/24 via 10.10.10.1 dev ens33
+```
+
+supports using `192.168.50.0/24` as that routed network. If the routing table only shows a default route, obtain the administrator subnet from the lab/network design, router, DHCP configuration, or other authoritative network documentation instead of inventing it.
+
+### 4.4 Active web server and current web ports
+
+```bash
+systemctl --type=service --state=running \
+  | grep -E 'apache2|nginx'
+
+sudo ss -lntp | grep -E ':(80|443)\b'
+ps -ef | grep -E '[n]ginx|[a]pache2'
+```
+
+Follow only the nginx or Apache branch that actually applies.
+
+### 4.5 Portal DocumentRoot and TLS certificate/key paths
+
+For nginx:
+
+```bash
+sudo nginx -T 2>&1 \
+  | grep -nE 'server_name|root |listen .*80|listen .*443|ssl_certificate|ssl_certificate_key'
+```
+
+For Apache:
+
+```bash
+sudo apache2ctl -S
+sudo grep -RniE \
+  'DocumentRoot|VirtualHost|SSLEngine|SSLCertificateFile|SSLCertificateKeyFile' \
+  /etc/apache2/sites-enabled /etc/apache2/sites-available
+```
+
+From the applicable output identify the real values. Then set shell variables for this session, replacing the examples below:
+
+```bash
+PORTAL_ROOT='/actual/portal/document-root'
+TLS_CERT='/actual/path/to/certificate.crt'
+TLS_KEY='/actual/path/to/private-key.key'
+```
+
+Confirm that the paths really exist before using them:
+
+```bash
+sudo stat "$PORTAL_ROOT"
+sudo stat "$TLS_CERT"
+sudo stat "$TLS_KEY"
+```
+
+Record them:
+
+```bash
+printf 'PORTAL_ROOT=%s\nTLS_CERT=%s\nTLS_KEY=%s\n' \
+  "$PORTAL_ROOT" "$TLS_CERT" "$TLS_KEY" \
+  | tee ~/hardening-evidence/discovered-paths.txt
+```
+
+The variables exist only in the current shell session. If you reconnect, set them again from the recorded values.
+
+### 4.6 Web-server worker account
+
+For nginx:
+
+```bash
+ps -eo user,pid,cmd | grep '[n]ginx'
+sudo nginx -T 2>&1 | grep -E '^\s*user\s'
+```
+
+For Apache:
+
+```bash
+ps -eo user,pid,cmd | grep '[a]pache2'
+grep -E '^APACHE_RUN_USER=' /etc/apache2/envvars
+```
+
+The worker user is commonly `www-data` on Debian, but verify it. Then set the real value:
+
+```bash
+WEB_USER='actual-web-worker-user'
+id "$WEB_USER"
+```
+
+### 4.7 Existing `webmaster` account and home directory
+
+```bash
+getent passwd webmaster
+id webmaster 2>/dev/null || true
+```
+
+If `webmaster` already exists, discover its home directory:
+
+```bash
+WEBMASTER_HOME=$(getent passwd webmaster | cut -d: -f6)
+printf 'WEBMASTER_HOME=%s\n' "$WEBMASTER_HOME"
+```
+
+If the account does not yet exist, create it later in Step 16 and then run these commands again.
+
+## 5. Investigate artifacts from the previous administrator
 
 Search filenames:
 
@@ -126,7 +309,7 @@ Disable only what is confirmed unnecessary:
 sudo systemctl disable --now suspicious.service
 ```
 
-## 5. Audit accounts and keys
+## 6. Audit accounts and SSH authorization keys
 
 List accounts and likely interactive shells:
 
@@ -155,7 +338,12 @@ If confirmed obsolete:
 sudo passwd -l asdrubale
 sudo usermod -s /usr/sbin/nologin asdrubale
 sudo usermod --expiredate 1 asdrubale
-sudo gpasswd -d asdrubale sudo   # only if actually a member
+```
+
+If and only if it is a member of `sudo`:
+
+```bash
+sudo gpasswd -d asdrubale sudo
 ```
 
 Verify:
@@ -188,7 +376,7 @@ sudo find /root /home \
 
 Remove only keys that are demonstrably unauthorized.
 
-## 6. Change the known `sysadmin` password
+## 7. Change the known `sysadmin` password
 
 The delivered password must be considered compromised.
 
@@ -200,7 +388,7 @@ sudo chage -l sysadmin
 
 Do not put the new password directly in shell history.
 
-## 7. Keep root local-console recovery, but block root over SSH
+## 8. Keep root local-console recovery, but block root over SSH
 
 Check root password state:
 
@@ -224,7 +412,7 @@ A local console normally shows a `/dev/tty*` terminal. Remote SSH root access wi
 PermitRootLogin no
 ```
 
-## 8. Patch the server
+## 9. Patch the server
 
 ```bash
 apt list --upgradable
@@ -238,13 +426,22 @@ Reboot if required:
 sudo reboot
 ```
 
-Then verify again:
+After reconnecting, remember to restore any shell variables you need, for example:
+
+```bash
+PORTAL_ROOT='/actual/portal/document-root'
+TLS_CERT='/actual/path/to/certificate.crt'
+TLS_KEY='/actual/path/to/private-key.key'
+WEB_USER='actual-web-worker-user'
+```
+
+Then verify updates again:
 
 ```bash
 apt list --upgradable
 ```
 
-## 9. Audit sudo privileges
+## 10. Audit sudo privileges
 
 ```bash
 getent group sudo
@@ -266,7 +463,7 @@ sudo visudo -f /etc/sudoers.d/<file>
 
 At minimum, remove unnecessary unrestricted `NOPASSWD: ALL` rules. Prefer command-specific least privilege where practical.
 
-## 10. Prepare administrative SSH key access before disabling passwords
+## 11. Prepare administrative SSH key access before disabling passwords
 
 On the administrator workstation:
 
@@ -278,23 +475,21 @@ ssh sysadmin@portal.fav.it
 
 Do not disable password authentication until this succeeds in a **new** session.
 
-## 11. Identify the active web server
+On the server, confirm the current administrator source address again if needed:
 
 ```bash
-systemctl --type=service --state=running \
-  | grep -E 'apache2|nginx'
-
-sudo ss -lntp | grep -E ':(80|443)\b'
-ps -ef | grep -E '[n]ginx|[a]pache2'
+printf '%s\n' "$SSH_CONNECTION"
 ```
 
-Determine the portal document root and TLS configuration.
+## 12. Reconfirm the active web-server configuration
+
+The read-only discovery commands from Step 4 can be repeated immediately before editing anything.
 
 For nginx:
 
 ```bash
 sudo nginx -T 2>&1 \
-  | grep -nE 'server_name|root |listen .*80|listen .*443|ssl_certificate'
+  | grep -nE 'server_name|root |listen .*80|listen .*443|ssl_certificate|ssl_certificate_key'
 ```
 
 For Apache:
@@ -302,30 +497,40 @@ For Apache:
 ```bash
 sudo apache2ctl -S
 sudo grep -RniE \
-  'DocumentRoot|VirtualHost|SSLEngine|SSLCertificate' \
+  'DocumentRoot|VirtualHost|SSLEngine|SSLCertificateFile|SSLCertificateKeyFile' \
   /etc/apache2/sites-enabled /etc/apache2/sites-available
 ```
 
-## 12. Preserve and inspect the existing self-signed certificate
+Before continuing, verify your variables still point to the discovered files:
 
-Once the certificate path is known:
+```bash
+printf 'PORTAL_ROOT=%s\nTLS_CERT=%s\nTLS_KEY=%s\nWEB_USER=%s\n' \
+  "$PORTAL_ROOT" "$TLS_CERT" "$TLS_KEY" "$WEB_USER"
+
+sudo stat "$PORTAL_ROOT" "$TLS_CERT" "$TLS_KEY"
+id "$WEB_USER"
+```
+
+## 13. Preserve and inspect the existing self-signed certificate
+
+Use the discovered certificate path:
 
 ```bash
 sudo openssl x509 \
-  -in /path/to/existing-certificate.crt \
+  -in "$TLS_CERT" \
   -noout -subject -issuer -serial -dates -fingerprint -sha256
 ```
 
-Save its fingerprint before changes:
+Save its fingerprint before web-server changes:
 
 ```bash
 sudo openssl x509 \
-  -in /path/to/existing-certificate.crt \
+  -in "$TLS_CERT" \
   -noout -fingerprint -sha256 \
   | tee ~/hardening-evidence/before/certificate-fingerprint.txt
 ```
 
-Inspect what the live service presents:
+Inspect what the live HTTPS service presents:
 
 ```bash
 openssl s_client \
@@ -337,7 +542,7 @@ openssl s_client \
 
 Do not generate a replacement certificate for this exercise.
 
-## 13. Enforce HTTP-to-HTTPS redirection
+## 14. Enforce HTTP-to-HTTPS redirection
 
 Test current behavior:
 
@@ -348,9 +553,9 @@ curl -kI https://portal.fav.it/
 
 Because the certificate is intentionally self-signed, `curl -k` is used only for this lab verification.
 
-### nginx
+### nginx branch
 
-The HTTP server block should only redirect:
+Locate the active server block from `nginx -T` before editing its source file. The port-80 server block should only redirect:
 
 ```nginx
 server {
@@ -368,9 +573,9 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-### Apache
+### Apache branch
 
-A port-80 virtual host can use:
+Use `apache2ctl -S` to identify the actual port-80 virtual-host configuration file. A port-80 virtual host can use:
 
 ```apache
 <VirtualHost *:80>
@@ -386,7 +591,7 @@ sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-Verify redirect behavior:
+### Verify the redirect
 
 ```bash
 curl -sSI http://portal.fav.it/
@@ -400,13 +605,11 @@ Expected logic:
 HTTP/80 → 301/308 → HTTPS/443 → portal response
 ```
 
-## 14. Verify the certificate was not replaced
-
-After web changes:
+## 15. Verify the certificate was not replaced
 
 ```bash
 sudo openssl x509 \
-  -in /path/to/existing-certificate.crt \
+  -in "$TLS_CERT" \
   -noout -fingerprint -sha256 \
   | tee ~/hardening-evidence/after/certificate-fingerprint.txt
 
@@ -415,21 +618,29 @@ diff \
   ~/hardening-evidence/after/certificate-fingerprint.txt
 ```
 
-No `diff` output means the fingerprint is unchanged.
+No `diff` output means the saved certificate fingerprint is unchanged.
 
-## 15. Prepare the dedicated `webmaster` SFTP account
+## 16. Prepare the dedicated `webmaster` SFTP account
 
 Check whether it exists:
 
 ```bash
 getent passwd webmaster
-id webmaster
+id webmaster 2>/dev/null || true
 ```
 
 If absent:
 
 ```bash
 sudo useradd -m -s /usr/sbin/nologin webmaster
+```
+
+Now discover and store the real home directory:
+
+```bash
+WEBMASTER_HOME=$(getent passwd webmaster | cut -d: -f6)
+printf 'WEBMASTER_HOME=%s\n' "$WEBMASTER_HOME"
+sudo stat "$WEBMASTER_HOME"
 ```
 
 Each developer should ideally use an individual SSH key rather than share a private key.
@@ -441,19 +652,31 @@ ssh-keygen -t ed25519
 ssh-copy-id webmaster@portal.fav.it
 ```
 
-Check key permissions:
+Back on the server, check key paths and permissions using the discovered home directory:
 
 ```bash
-sudo stat /home/webmaster \
-  /home/webmaster/.ssh \
-  /home/webmaster/.ssh/authorized_keys
+sudo stat "$WEBMASTER_HOME" \
+  "$WEBMASTER_HOME/.ssh" \
+  "$WEBMASTER_HOME/.ssh/authorized_keys"
 
-sudo chown -R webmaster:webmaster /home/webmaster/.ssh
-sudo chmod 0700 /home/webmaster/.ssh
-sudo chmod 0600 /home/webmaster/.ssh/authorized_keys
+sudo chown -R webmaster:webmaster "$WEBMASTER_HOME/.ssh"
+sudo chmod 0700 "$WEBMASTER_HOME/.ssh"
+sudo chmod 0600 "$WEBMASTER_HOME/.ssh/authorized_keys"
 ```
 
-## 16. Restrict `webmaster` to SFTP only
+## 17. Restrict `webmaster` to SFTP only
+
+First inspect where SSH settings are currently defined:
+
+```bash
+grep -n '^Include' /etc/ssh/sshd_config
+ls -la /etc/ssh/sshd_config.d/
+
+sudo grep -RniE \
+  'PermitRootLogin|PasswordAuthentication|AllowUsers|Match|ForceCommand|ChrootDirectory' \
+  /etc/ssh/sshd_config /etc/ssh/sshd_config.d \
+  2>/dev/null
+```
 
 The global SSH allowlist must include both required identities:
 
@@ -486,13 +709,13 @@ Reload only if validation succeeds:
 sudo systemctl reload ssh
 ```
 
-Positive SFTP test:
+Positive SFTP test from a developer workstation:
 
 ```bash
 sftp webmaster@portal.fav.it
 ```
 
-Negative shell test:
+Negative shell tests:
 
 ```bash
 ssh webmaster@portal.fav.it
@@ -507,23 +730,76 @@ Negative password-only SFTP test:
 sftp -o PubkeyAuthentication=no webmaster@portal.fav.it
 ```
 
-## 17. Optional stronger SFTP confinement with chroot
+## 18. Discover the developer client IP and network before source-restricting SSH/SFTP
 
-First determine the **actual** portal path. Suppose only as an example it is `/var/www/portal`.
-
-The chroot root itself must not be writable by `webmaster`:
+After a developer makes a successful SFTP connection, inspect the SSH journal:
 
 ```bash
-sudo chown root:root /var/www
-sudo chmod 0755 /var/www
+sudo journalctl -u ssh --since '15 minutes ago' \
+  | grep -i webmaster
 ```
 
-Example Match block:
+While the connection is active, you can also inspect TCP/22 sessions:
+
+```bash
+sudo ss -tnp | grep ':22'
+```
+
+A log entry such as:
+
+```text
+Accepted publickey for webmaster from 192.168.60.44 port 50120
+```
+
+identifies the client as `192.168.60.44`. Record your real value:
+
+```bash
+DEVELOPER_IP='actual-developer-client-ip'
+printf 'DEVELOPER_IP=%s\n' "$DEVELOPER_IP"
+```
+
+Inspect the route toward that client:
+
+```bash
+ip route get "$DEVELOPER_IP"
+ip -4 route show table all
+```
+
+As with the administrator network, do not infer a CIDR prefix from a single client IP. Use an explicit route or authoritative network configuration to determine the real developer subnet.
+
+## 19. Optional stronger SFTP confinement with chroot
+
+Use the discovered `PORTAL_ROOT`; do not assume `/var/www/portal`.
+
+Inspect the path hierarchy first:
+
+```bash
+namei -l "$PORTAL_ROOT"
+```
+
+A convenient candidate parent can be displayed with:
+
+```bash
+CHROOT_ROOT=$(dirname "$PORTAL_ROOT")
+SFTP_START="/$(basename "$PORTAL_ROOT")"
+printf 'CHROOT_ROOT=%s\nSFTP_START=%s\n' "$CHROOT_ROOT" "$SFTP_START"
+```
+
+Do **not** use `CHROOT_ROOT` automatically. An OpenSSH `ChrootDirectory` and all path components leading to it must satisfy OpenSSH ownership/permission requirements; in particular, the chroot root must not be writable by `webmaster`.
+
+Inspect before changing anything:
+
+```bash
+namei -l "$CHROOT_ROOT"
+sudo stat "$CHROOT_ROOT"
+```
+
+If the chosen chroot root is correct for the actual layout, the corresponding SSH configuration would use the literal discovered paths, for example:
 
 ```text
 Match User webmaster
-    ChrootDirectory /var/www
-    ForceCommand internal-sftp -d /portal
+    ChrootDirectory /actual/chroot/root
+    ForceCommand internal-sftp -d /actual-sftp-start-directory
     PermitTTY no
     X11Forwarding no
     AllowTcpForwarding no
@@ -538,32 +814,27 @@ sudo sshd -t
 sudo systemctl reload ssh
 ```
 
-Do not use this exact path unless it matches the discovered DocumentRoot layout.
+Retest SFTP immediately.
 
-## 18. Create a controlled portal-content permission model
+## 20. Create a controlled portal-content permission model
 
 Create a dedicated group:
 
 ```bash
 sudo groupadd -f webcontent
 sudo usermod -aG webcontent webmaster
-sudo usermod -aG webcontent www-data
+sudo usermod -aG webcontent "$WEB_USER"
 ```
 
 Verify:
 
 ```bash
 id webmaster
-id www-data
+id "$WEB_USER"
+sudo stat "$PORTAL_ROOT"
 ```
 
-Set the real portal root first, for example:
-
-```bash
-PORTAL_ROOT=/var/www/portal
-```
-
-Then:
+Apply permissions to the **discovered** portal root:
 
 ```bash
 sudo chown -R webmaster:webcontent "$PORTAL_ROOT"
@@ -573,7 +844,7 @@ sudo find "$PORTAL_ROOT" -type f -exec chmod 0640 {} +
 
 If the application needs writable runtime directories, grant write access only to those specific directories rather than to the whole application tree.
 
-If `www-data` was newly added to a group, restart the active web server so new worker processes receive the new supplementary group:
+If the web-server worker was newly added to `webcontent`, restart only the active web server so new workers receive the supplementary group:
 
 ```bash
 sudo systemctl restart nginx
@@ -591,19 +862,24 @@ Verify the portal again:
 curl -kI https://portal.fav.it/
 ```
 
-## 19. Harden the global SSH policy
+## 21. Harden the global SSH policy
 
 Inspect current values:
 
 ```bash
 sudo sshd -T | grep -E \
-'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication'
+'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|allowusers'
 ```
 
-Inspect drop-ins:
+Inspect drop-ins and existing definitions:
 
 ```bash
 ls -la /etc/ssh/sshd_config.d/
+
+sudo grep -RniE \
+  'PermitRootLogin|PasswordAuthentication|KbdInteractiveAuthentication|PubkeyAuthentication|AllowUsers|Match' \
+  /etc/ssh/sshd_config /etc/ssh/sshd_config.d \
+  2>/dev/null
 ```
 
 A suitable global policy is:
@@ -622,12 +898,17 @@ LoginGraceTime 30
 AllowUsers sysadmin webmaster
 ```
 
-Remember that the `webmaster` Match block further restricts that account.
+Remember that OpenSSH option precedence and `Match` blocks matter; verify effective values instead of assuming that a later-looking filename overrides another setting.
 
-Validate:
+Validate syntax:
 
 ```bash
 sudo sshd -t
+```
+
+Inspect effective global values:
+
+```bash
 sudo sshd -T
 ```
 
@@ -655,23 +936,28 @@ Expected:
 - `webmaster` SFTP works;
 - `webmaster` normal shell does not.
 
-For user-specific effective SSH configuration:
+For user-specific effective SSH configuration, use the discovered client IPs.
+
+For `webmaster`:
 
 ```bash
 sudo sshd -T \
-  -C user=webmaster,host=portal.fav.it,addr=<DEVELOPER_IP> \
+  -C user=webmaster,host=portal.fav.it,addr="$DEVELOPER_IP" \
   | grep -E \
   'forcecommand|chrootdirectory|passwordauthentication|pubkeyauthentication|x11forwarding|allowtcpforwarding|permittty'
 ```
 
-And for `sysadmin`:
+For `sysadmin`, first restore/discover `ADMIN_IP` if needed:
 
 ```bash
+ADMIN_IP=$(printf '%s\n' "$SSH_CONNECTION" | awk '{print $1}')
+printf 'ADMIN_IP=%s\n' "$ADMIN_IP"
+
 sudo sshd -T \
-  -C user=sysadmin,host=portal.fav.it,addr=<ADMIN_IP>
+  -C user=sysadmin,host=portal.fav.it,addr="$ADMIN_IP"
 ```
 
-## 20. Remove obsolete file-transfer services
+## 22. Remove obsolete file-transfer services
 
 Check sockets:
 
@@ -709,7 +995,7 @@ sudo ss -lntup | grep -E ':(20|21|69)\b'
 
 SFTP remains on TCP/22 through OpenSSH.
 
-## 21. Audit other unnecessary services and persistence mechanisms
+## 23. Audit other unnecessary services and persistence mechanisms
 
 ```bash
 ss -lntup
@@ -724,7 +1010,7 @@ sudo grep -Rni 'ExecStart\|ExecStartPre\|ExecStartPost' /etc/systemd/system
 
 For every component ask whether it is required by the portal role. Disable/remove only after establishing that it is unnecessary.
 
-## 22. Audit dangerous filesystem permissions and privilege mechanisms
+## 24. Audit dangerous filesystem permissions and privilege mechanisms
 
 World-writable directories:
 
@@ -749,7 +1035,7 @@ sudo find / \
   -ls 2>/dev/null
 ```
 
-Linux capabilities:
+Linux file capabilities:
 
 ```bash
 sudo getcap -r / 2>/dev/null
@@ -757,18 +1043,48 @@ sudo getcap -r / 2>/dev/null
 
 Investigate unexpected/custom entries instead of stripping privileges indiscriminately.
 
-## 23. Search for obvious exposed secrets
+## 25. Search for obvious exposed secrets
 
 ```bash
 sudo grep -RniE \
   'password|token|secret|key' \
-  /home /opt /var/www \
+  /home /opt "$PORTAL_ROOT" \
   2>/dev/null
 ```
 
 This is a rough educational check and can produce false positives. If a real credential has been exposed, remove the exposed copy **and rotate/revoke the credential**.
 
-## 24. Configure nftables for the actual role
+## 26. Discover/confirm source networks before writing nftables rules
+
+Display all relevant IPv4 routes again:
+
+```bash
+ip -4 route show table all
+```
+
+If the current admin and developer IP variables are set:
+
+```bash
+printf 'ADMIN_IP=%s\nDEVELOPER_IP=%s\n' "$ADMIN_IP" "$DEVELOPER_IP"
+ip route get "$ADMIN_IP"
+ip route get "$DEVELOPER_IP"
+```
+
+Determine `ADMIN_SUBNET` and `DEVELOPER_SUBNET` only from an explicit network route/configuration or authoritative network documentation.
+
+Record the confirmed values manually, for example:
+
+```bash
+ADMIN_SUBNET='actual-admin-cidr'
+DEVELOPER_SUBNET='actual-developer-cidr'
+printf 'ADMIN_SUBNET=%s\nDEVELOPER_SUBNET=%s\n' \
+  "$ADMIN_SUBNET" "$DEVELOPER_SUBNET" \
+  | tee ~/hardening-evidence/discovered-networks.txt
+```
+
+Do not place the literal strings `actual-admin-cidr` or `actual-developer-cidr` into the firewall; replace them with confirmed CIDRs first.
+
+## 27. Configure nftables for the actual role
 
 The final externally required TCP ports are:
 
@@ -812,33 +1128,45 @@ table inet filter {
 }
 ```
 
-Where topology permits, restrict TCP/22 by source. Remember that both administrators **and developers** need TCP/22:
+Where the topology permits source restriction, replace the unrestricted TCP/22 rule with literal confirmed networks such as:
 
 ```nft
-ip saddr <ADMIN_SUBNET> tcp dport 22 accept
-ip saddr <DEVELOPER_SUBNET> tcp dport 22 accept
+ip saddr <CONFIRMED_ADMIN_SUBNET> tcp dport 22 accept
+ip saddr <CONFIRMED_DEVELOPER_SUBNET> tcp dport 22 accept
 ```
 
-Validate before applying:
+Remember that both administrators **and developers** need TCP/22 because SFTP is part of SSH.
+
+Before applying any new firewall, inspect the interface and current SSH source one last time:
+
+```bash
+ip -br -4 addr
+ip -4 route
+printf '%s\n' "$SSH_CONNECTION"
+```
+
+Validate firewall syntax:
 
 ```bash
 sudo nft -c -f /etc/nftables.conf
 ```
 
-Keep the old SSH session open, then apply:
+`nft -c` checks syntax; it does **not** prove that the policy will not lock you out.
+
+Keep the old SSH session and console access available, then apply:
 
 ```bash
 sudo nft -f /etc/nftables.conf
 ```
 
-Immediately test a new admin session and SFTP session:
+Immediately test a **new** administrative session and a new SFTP session:
 
 ```bash
 ssh sysadmin@portal.fav.it
 sftp webmaster@portal.fav.it
 ```
 
-Then enable persistence:
+Only after both succeed, enable persistence:
 
 ```bash
 sudo systemctl enable --now nftables
@@ -851,7 +1179,7 @@ sudo nft list ruleset
 systemctl status nftables
 ```
 
-## 25. AppArmor
+## 28. AppArmor
 
 ```bash
 systemctl status apparmor
@@ -891,9 +1219,11 @@ systemctl status <service>
 journalctl -u <service>
 ```
 
-## 26. Selected sysctl hardening
+Do not blindly enforce every available profile.
 
-Inspect:
+## 29. Selected sysctl hardening
+
+Inspect current values:
 
 ```bash
 sysctl net.ipv4.ip_forward
@@ -939,7 +1269,7 @@ sudo sysctl --system
 
 Do not blindly use strict `rp_filter=1` on multihomed, VPN, asymmetric-routing or policy-routing systems.
 
-## 27. Persistent logging
+## 30. Persistent logging
 
 Inspect:
 
@@ -971,13 +1301,21 @@ journalctl --list-boots
 journalctl -u ssh
 journalctl -u nftables
 journalctl -u apparmor
+```
+
+Check only the web-server unit that is actually active:
+
+```bash
 journalctl -u nginx
+```
+
+or:
+
+```bash
 journalctl -u apache2
 ```
 
-Check only the relevant web-server unit.
-
-## 28. Automatic updates
+## 31. Automatic updates
 
 ```bash
 dpkg -l unattended-upgrades
@@ -1005,14 +1343,29 @@ systemctl list-timers | grep apt
 sudo unattended-upgrade --dry-run --debug
 ```
 
-Review `/etc/apt/apt.conf.d/50unattended-upgrades` as well as `20auto-upgrades` so you know what origins/packages the unattended policy actually covers.
+Review both policy files:
 
-## 29. Final functional and security verification
+```bash
+sudo cat /etc/apt/apt.conf.d/20auto-upgrades
+sudo sed -n '1,240p' /etc/apt/apt.conf.d/50unattended-upgrades
+```
 
-Hostname:
+This tells you not only whether timers run, but also what unattended-upgrade policy is actually configured.
+
+## 32. Final functional and security verification
+
+Hostname and name resolution:
 
 ```bash
 hostname -f
+getent ahostsv4 portal.fav.it
+```
+
+Interfaces/routes:
+
+```bash
+ip -br -4 addr
+ip -4 route
 ```
 
 Listeners:
@@ -1021,10 +1374,12 @@ Listeners:
 sudo ss -lntup
 ```
 
-SSH syntax:
+SSH syntax and effective policy:
 
 ```bash
 sudo sshd -t
+sudo sshd -T | grep -E \
+'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|allowusers'
 ```
 
 Firewall:
@@ -1043,6 +1398,16 @@ HTTPS portal:
 
 ```bash
 curl -kI https://portal.fav.it/
+```
+
+Certificate fingerprint:
+
+```bash
+openssl s_client \
+  -connect portal.fav.it:443 \
+  -servername portal.fav.it \
+  </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
 ```
 
 Admin SSH:
@@ -1066,7 +1431,7 @@ ssh webmaster@portal.fav.it
 sftp -o PubkeyAuthentication=no webmaster@portal.fav.it
 ```
 
-External scan:
+From an authorized external assessment host:
 
 ```bash
 sudo nmap -sS -sV -p- portal.fav.it -oN nmap-after.txt
@@ -1082,7 +1447,7 @@ Expected final externally required TCP exposure:
 
 Any additional listener needs an explicit role justification.
 
-## 30. Capture the after-state
+## 33. Capture the final after-state
 
 ```bash
 ss -lntup | tee ~/hardening-evidence/after/listening-sockets.txt
@@ -1094,6 +1459,18 @@ sudo sshd -T \
   | tee ~/hardening-evidence/after/sshd-effective.txt
 sudo aa-status 2>&1 \
   | tee ~/hardening-evidence/after/apparmor.txt
+```
+
+Compare selected before/after evidence:
+
+```bash
+diff -u \
+  ~/hardening-evidence/before/listening-sockets.txt \
+  ~/hardening-evidence/after/listening-sockets.txt
+
+diff -u \
+  ~/hardening-evidence/before/nftables.txt \
+  ~/hardening-evidence/after/nftables.txt
 ```
 
 Use the [evidence template](evidence-template.md) for each finding so the final report demonstrates:
@@ -1108,4 +1485,29 @@ REMEDIATION
 VERIFICATION
       ↓
 REQUIRED SERVICE STILL WORKS
+```
+
+## 34. Values you should have discovered by the end
+
+Do not complete this table from assumptions; complete it from the commands above.
+
+| Value | How it was discovered |
+|---|---|
+| `SERVER_IP` | `ip -br -4 addr` |
+| `SERVER_SUBNET` | `ip -4 route` / interface prefix |
+| `GATEWAY` | `ip -4 route` |
+| `ADMIN_IP` | `SSH_CONNECTION`, `who`, `w` |
+| `ADMIN_SUBNET` | explicit route or authoritative network configuration |
+| `DEVELOPER_IP` | SSH journal / active TCP/22 session |
+| `DEVELOPER_SUBNET` | explicit route or authoritative network configuration |
+| `PORTAL_ROOT` | nginx/Apache active virtual-host configuration |
+| `TLS_CERT` | nginx/Apache TLS configuration |
+| `TLS_KEY` | nginx/Apache TLS configuration |
+| `WEB_USER` | active worker processes/configuration |
+| `WEBMASTER_HOME` | `getent passwd webmaster` |
+
+The operating rule throughout the lab is:
+
+```text
+DISCOVER → RECORD → VALIDATE → MODIFY → VERIFY
 ```
