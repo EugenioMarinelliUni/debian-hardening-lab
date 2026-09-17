@@ -3,95 +3,232 @@ layout: default
 title: Complete Hardening Procedure
 ---
 
-# Complete Debian 13 Hardening Procedure
+# Complete Debian 13 Hardening Procedure for `portal.fav.it`
 
-This procedure combines the two source labs into one sequence. Role-specific steps are marked where relevant.
+This procedure is tailored to the final assignment: a Debian 13 server hosting the company portal `portal.fav.it`.
 
-> **Safety:** Keep an existing SSH session open while changing SSH or firewall settings. Prefer VM console access and a snapshot before making disruptive changes.
+## 1. Preserve recoverability
 
-## 1. Establish the server role
+Before touching SSH, firewall rules, authentication, filesystem ownership or kernel parameters:
 
-Before changing anything, write down what the machine is supposed to do. Typical required services might be SSH for administration, HTTP only if a web service is needed, and SMB only for a file server. Anything not required should be considered for removal.
+- create a VM snapshot if available;
+- keep the current administrative SSH session open;
+- keep console access available if possible.
 
-## 2. Create a rollback point
+Create evidence directories:
 
-Create a VM snapshot before modifying authentication, networking, firewall rules, services, filesystem permissions, or kernel parameters.
-
-Example snapshot names:
-
-```text
-01-INSECURE-BASELINE
-01-INSECURE-FILESERVER
+```bash
+mkdir -p ~/hardening-evidence/{before,after}
+script -a ~/hardening-evidence/hardening-session.log
 ```
 
-A snapshot is a rollback mechanism, not a substitute for a tested backup.
+Exit `script` recording later with:
 
-## 3. Identify the operating system and network
+```bash
+exit
+```
+
+## 2. Confirm identity and networking
 
 ```bash
 cat /etc/os-release
 uname -a
 hostnamectl
-ip addr
+hostname
+hostname -f
+ip -br addr
 ip route
+getent hosts portal.fav.it
 ```
 
-These commands confirm the distribution, kernel, hostname, interfaces, IP addresses, and routing table before any hardening decisions are made.
+The intended FQDN is:
 
-## 4. Capture a before-state
+```text
+portal.fav.it
+```
+
+If the configured hostname is wrong:
 
 ```bash
-mkdir -p ~/assessment-before
+sudo hostnamectl set-hostname portal.fav.it
+```
 
-ss -lntup > ~/assessment-before/ss.txt
+Inspect `/etc/hosts` before modifying local name resolution:
+
+```bash
+cat /etc/hosts
+```
+
+## 3. Capture the baseline
+
+```bash
+ss -lntup | tee ~/hardening-evidence/before/listening-sockets.txt
 systemctl --type=service --state=running \
-    > ~/assessment-before/services.txt
+  | tee ~/hardening-evidence/before/running-services.txt
 sudo nft list ruleset \
-    > ~/assessment-before/nftables.txt
+  | tee ~/hardening-evidence/before/nftables.txt
 sudo sshd -T \
-    > ~/assessment-before/sshd-effective.txt
-sudo aa-status \
-    > ~/assessment-before/apparmor.txt 2>&1
+  | tee ~/hardening-evidence/before/sshd-effective.txt
+sudo aa-status 2>&1 \
+  | tee ~/hardening-evidence/before/apparmor.txt
 ```
 
-For a Samba server also capture:
+From another authorized machine:
 
 ```bash
-sudo testparm -s \
-    > ~/assessment-before/samba.txt
+sudo nmap -sS -sV -p- portal.fav.it \
+  -oN nmap-before.txt
 ```
 
-From another authorized host, scan the server externally:
+The local `ss` view shows listening sockets. The external Nmap view shows what another host can reach.
+
+## 4. Investigate artifacts from the previous administrator
+
+Search filenames:
 
 ```bash
-sudo nmap -sS -sV 10.10.10.20 -oN nmap-before.txt
+sudo find /etc /usr/local /opt \
+  -xdev \
+  -iname '*asdrubale*' \
+  -ls \
+  2>/dev/null
 ```
 
-For the file-server example:
+Search configuration contents:
 
 ```bash
-sudo nmap -sS -sV 10.10.10.30 -oN nmap-before.txt
+sudo grep -RniI 'asdrubale' \
+  /etc /usr/local /opt \
+  2>/dev/null
 ```
 
-The local `ss` view shows what is listening; Nmap shows what is actually reachable from another host.
+Check systemd, cron, sudo and SSH locations:
 
-## 5. Patch the system
+```bash
+systemctl list-unit-files --all | grep -i asdrubale
+sudo grep -RniI 'asdrubale' /etc/cron* /var/spool/cron 2>/dev/null
+sudo grep -RniI 'asdrubale' /etc/sudoers /etc/sudoers.d 2>/dev/null
+sudo grep -RniI 'asdrubale' /etc/ssh /root/.ssh /home/*/.ssh 2>/dev/null
+```
 
-Inspect available upgrades:
+Do not delete matches automatically. Inspect suspicious files and units:
+
+```bash
+sudo stat /path/to/file
+sudo less /path/to/file
+sudo systemctl cat suspicious.service
+sudo systemctl status suspicious.service
+```
+
+Disable only what is confirmed unnecessary:
+
+```bash
+sudo systemctl disable --now suspicious.service
+```
+
+## 5. Audit accounts and keys
+
+List accounts and likely interactive shells:
+
+```bash
+getent passwd
+awk -F: '$7 !~ /(nologin|false)$/ {print $1,$6,$7}' /etc/passwd
+```
+
+Look for a former-administrator account:
+
+```bash
+getent passwd | grep -i asdrubale
+getent group | grep -i asdrubale
+```
+
+If it exists:
+
+```bash
+id asdrubale
+sudo -l -U asdrubale
+```
+
+If confirmed obsolete:
+
+```bash
+sudo passwd -l asdrubale
+sudo usermod -s /usr/sbin/nologin asdrubale
+sudo usermod --expiredate 1 asdrubale
+sudo gpasswd -d asdrubale sudo   # only if actually a member
+```
+
+Verify:
+
+```bash
+passwd -S asdrubale
+getent passwd asdrubale
+id asdrubale
+```
+
+Enumerate SSH authorization files:
+
+```bash
+sudo find /root /home \
+  -path '*/.ssh/authorized_keys' \
+  -type f \
+  -print \
+  2>/dev/null
+```
+
+Review key contents:
+
+```bash
+sudo find /root /home \
+  -path '*/.ssh/authorized_keys' \
+  -type f \
+  -exec sh -c 'echo "===== $1 ====="; nl -ba "$1"' _ {} \; \
+  2>/dev/null
+```
+
+Remove only keys that are demonstrably unauthorized.
+
+## 6. Change the known `sysadmin` password
+
+The delivered password must be considered compromised.
+
+```bash
+sudo passwd sysadmin
+sudo passwd -S sysadmin
+sudo chage -l sysadmin
+```
+
+Do not put the new password directly in shell history.
+
+## 7. Keep root local-console recovery, but block root over SSH
+
+Check root password state:
+
+```bash
+sudo passwd -S root
+```
+
+Do **not** lock root for this exercise.
+
+Test local-console root access from the actual console:
+
+```bash
+whoami
+tty
+id
+```
+
+A local console normally shows a `/dev/tty*` terminal. Remote SSH root access will be disabled separately with:
+
+```text
+PermitRootLogin no
+```
+
+## 8. Patch the server
 
 ```bash
 apt list --upgradable
-```
-
-Refresh package metadata:
-
-```bash
 sudo apt update
-```
-
-Upgrade installed packages:
-
-```bash
 sudo apt full-upgrade
 ```
 
@@ -101,79 +238,18 @@ Reboot if required:
 sudo reboot
 ```
 
-Then check again:
+Then verify again:
 
 ```bash
 apt list --upgradable
 ```
 
-## 6. Audit local accounts
-
-List accounts:
-
-```bash
-getent passwd
-```
-
-Highlight accounts with interactive shells:
-
-```bash
-awk -F: '$7 !~ /(nologin|false)$/ {print $1,$6,$7}' /etc/passwd
-```
-
-For an obsolete account such as `legacy` or `contractor`:
-
-```bash
-sudo passwd -l legacy
-sudo usermod -s /usr/sbin/nologin legacy
-sudo usermod --expiredate 1 legacy
-```
-
-Verify:
-
-```bash
-passwd -S legacy
-getent passwd legacy
-id legacy
-```
-
-`passwd -l` locks password authentication. The `nologin` shell and account expiration provide stronger disablement.
-
-## 7. Review password-aging policy
-
-```bash
-sudo chage -l operator
-```
-
-A lab policy example is:
-
-```bash
-sudo chage -M 90 -m 1 -W 14 operator
-```
-
-Interpret this as an organizational example, not a universal security requirement.
-
-## 8. Audit sudo privileges
+## 9. Audit sudo privileges
 
 ```bash
 getent group sudo
 sudo -l
-sudo grep -R "NOPASSWD" \
-    /etc/sudoers \
-    /etc/sudoers.d \
-    2>/dev/null
-```
-
-A rule such as:
-
-```text
-sysadmin ALL=(ALL:ALL) NOPASSWD: ALL
-```
-
-grants unrestricted passwordless sudo. As a minimum lab remediation, require sudo authentication:
-
-```text
-sysadmin ALL=(ALL:ALL) ALL
+sudo grep -R "NOPASSWD" /etc/sudoers /etc/sudoers.d 2>/dev/null
 ```
 
 Edit sudo configuration only with:
@@ -188,188 +264,101 @@ or:
 sudo visudo -f /etc/sudoers.d/<file>
 ```
 
-Then verify again with:
+At minimum, remove unnecessary unrestricted `NOPASSWD: ALL` rules. Prefer command-specific least privilege where practical.
 
-```bash
-sudo -l
-```
+## 10. Prepare administrative SSH key access before disabling passwords
 
-## 9. Prepare SSH key authentication
-
-On the administrative workstation:
+On the administrator workstation:
 
 ```bash
 ssh-keygen -t ed25519
-ssh-copy-id sysadmin@10.10.10.20
-ssh sysadmin@10.10.10.20
+ssh-copy-id sysadmin@portal.fav.it
+ssh sysadmin@portal.fav.it
 ```
 
-For the file server:
+Do not disable password authentication until this succeeds in a **new** session.
+
+## 11. Identify the active web server
 
 ```bash
-ssh-copy-id operator@10.10.10.30
-ssh operator@10.10.10.30
+systemctl --type=service --state=running \
+  | grep -E 'apache2|nginx'
+
+sudo ss -lntp | grep -E ':(80|443)\b'
+ps -ef | grep -E '[n]ginx|[a]pache2'
 ```
 
-Do not disable password authentication until key authentication has been tested successfully.
+Determine the portal document root and TLS configuration.
 
-## 10. Harden the SSH server
-
-Inspect the effective configuration:
+For nginx:
 
 ```bash
-sudo sshd -T | grep -E \
-'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication'
+sudo nginx -T 2>&1 \
+  | grep -nE 'server_name|root |listen .*80|listen .*443|ssl_certificate'
 ```
 
-Inspect existing drop-ins:
+For Apache:
 
 ```bash
-ls -la /etc/ssh/sshd_config.d/
+sudo apache2ctl -S
+sudo grep -RniE \
+  'DocumentRoot|VirtualHost|SSLEngine|SSLCertificate' \
+  /etc/apache2/sites-enabled /etc/apache2/sites-available
 ```
 
-Create a hardening drop-in, for example:
+## 12. Preserve and inspect the existing self-signed certificate
+
+Once the certificate path is known:
 
 ```bash
-sudo nano /etc/ssh/sshd_config.d/00-hardening.conf
+sudo openssl x509 \
+  -in /path/to/existing-certificate.crt \
+  -noout -subject -issuer -serial -dates -fingerprint -sha256
 ```
 
-Suggested content:
-
-```text
-PermitRootLogin no
-PubkeyAuthentication yes
-PasswordAuthentication no
-KbdInteractiveAuthentication no
-PermitEmptyPasswords no
-
-X11Forwarding no
-AllowTcpForwarding no
-GatewayPorts no
-
-MaxAuthTries 3
-LoginGraceTime 30
-AllowUsers sysadmin
-```
-
-For the file server, replace `sysadmin` with `operator` if appropriate.
-
-Validate syntax:
+Save its fingerprint before changes:
 
 ```bash
-sudo sshd -t
+sudo openssl x509 \
+  -in /path/to/existing-certificate.crt \
+  -noout -fingerprint -sha256 \
+  | tee ~/hardening-evidence/before/certificate-fingerprint.txt
 ```
 
-Inspect effective values:
+Inspect what the live service presents:
 
 ```bash
-sudo sshd -T
+openssl s_client \
+  -connect portal.fav.it:443 \
+  -servername portal.fav.it \
+  </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates -fingerprint -sha256
 ```
 
-Reload only after validation succeeds:
+Do not generate a replacement certificate for this exercise.
+
+## 13. Enforce HTTP-to-HTTPS redirection
+
+Test current behavior:
 
 ```bash
-sudo systemctl reload ssh
+curl -I http://portal.fav.it/
+curl -kI https://portal.fav.it/
 ```
 
-Positive test:
+Because the certificate is intentionally self-signed, `curl -k` is used only for this lab verification.
 
-```bash
-ssh sysadmin@10.10.10.20
-```
+### nginx
 
-Negative tests:
-
-```bash
-ssh root@10.10.10.20
-ssh -o PubkeyAuthentication=no sysadmin@10.10.10.20
-```
-
-Root login and password-only access should fail.
-
-## 11. Minimize the service attack surface
-
-Re-enumerate:
-
-```bash
-ss -lntup
-systemctl --type=service --state=running
-systemctl list-unit-files --type=service
-```
-
-For every service ask whether the role actually requires it.
-
-### Remove FTP if unnecessary
-
-```bash
-sudo systemctl disable --now vsftpd
-sudo apt purge vsftpd
-```
-
-Verify locally:
-
-```bash
-ss -lntup | grep ':21 '
-```
-
-Verify remotely:
-
-```bash
-nmap -p21 10.10.10.20
-```
-
-### Remove rpcbind if unnecessary
-
-```bash
-sudo systemctl disable --now rpcbind
-sudo systemctl disable --now rpcbind.socket
-sudo apt purge rpcbind
-```
-
-Verify:
-
-```bash
-ss -lntup | grep ':111 '
-```
-
-## 12. Harden nginx if it is required
-
-If nginx is unnecessary:
-
-```bash
-sudo systemctl disable --now nginx
-sudo apt purge nginx nginx-common
-```
-
-If it is required, inspect the complete configuration:
-
-```bash
-sudo nginx -T
-```
-
-Remove unintended directory indexing such as:
+The HTTP server block should only redirect:
 
 ```nginx
-autoindex on;
-```
-
-Reduce banner disclosure:
-
-```nginx
-server_tokens off;
-```
-
-Move sensitive backups outside the web root:
-
-```bash
-sudo mkdir -p /srv/private-backups
-sudo mv /var/www/html/backups/* /srv/private-backups/
-```
-
-Or remove obsolete material carefully:
-
-```bash
-sudo rm -rf /var/www/html/backups
+server {
+    listen 80;
+    listen [::]:80;
+    server_name portal.fav.it;
+    return 301 https://$host$request_uri;
+}
 ```
 
 Validate and reload:
@@ -379,42 +368,15 @@ sudo nginx -t
 sudo systemctl reload nginx
 ```
 
-Test:
+### Apache
 
-```bash
-curl -I http://10.10.10.20/
-curl http://10.10.10.20/backups/
-```
-
-The sensitive path should return a denial or not-found response rather than a listing.
-
-## 13. Harden Apache if it is required
-
-If Apache is unnecessary:
-
-```bash
-sudo systemctl disable --now apache2
-sudo apt purge apache2 apache2-bin apache2-data apache2-utils
-```
-
-If it is required:
-
-```bash
-sudo apache2ctl -S
-sudo grep -R "Options .*Indexes" /etc/apache2 2>/dev/null
-```
-
-Disable directory listing in the relevant configuration:
+A port-80 virtual host can use:
 
 ```apache
-Options -Indexes
-```
-
-Reduce banner disclosure:
-
-```apache
-ServerTokens Prod
-ServerSignature Off
+<VirtualHost *:80>
+    ServerName portal.fav.it
+    Redirect permanent / https://portal.fav.it/
+</VirtualHost>
 ```
 
 Validate and reload:
@@ -424,214 +386,402 @@ sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-Test:
+Verify redirect behavior:
 
 ```bash
-curl -I http://10.10.10.30/
-curl http://10.10.10.30/archive/
+curl -sSI http://portal.fav.it/
+curl -kIL http://portal.fav.it/
+curl -sSI http://portal.fav.it/example/path
 ```
 
-Use HTTPS/TLS for real applications carrying credentials or sensitive data.
+Expected logic:
 
-## 14. Harden Samba for the file-server role
+```text
+HTTP/80 → 301/308 → HTTPS/443 → portal response
+```
 
-Inspect configuration and guest visibility:
+## 14. Verify the certificate was not replaced
+
+After web changes:
 
 ```bash
-sudo testparm -s
-smbclient -L localhost -N
+sudo openssl x509 \
+  -in /path/to/existing-certificate.crt \
+  -noout -fingerprint -sha256 \
+  | tee ~/hardening-evidence/after/certificate-fingerprint.txt
+
+diff \
+  ~/hardening-evidence/before/certificate-fingerprint.txt \
+  ~/hardening-evidence/after/certificate-fingerprint.txt
 ```
 
-Create a dedicated collaboration group:
+No `diff` output means the fingerprint is unchanged.
+
+## 15. Prepare the dedicated `webmaster` SFTP account
+
+Check whether it exists:
 
 ```bash
-sudo groupadd -f fileshare
-sudo usermod -aG fileshare operator
-id operator
+getent passwd webmaster
+id webmaster
 ```
 
-Add Samba credentials:
+If absent:
 
 ```bash
-sudo smbpasswd -a operator
+sudo useradd -m -s /usr/sbin/nologin webmaster
 ```
 
-Fix ownership:
+Each developer should ideally use an individual SSH key rather than share a private key.
+
+On the developer workstation:
 
 ```bash
-sudo chown -R root:fileshare /srv/public-share
+ssh-keygen -t ed25519
+ssh-copy-id webmaster@portal.fav.it
 ```
 
-Set directory permissions safely:
+Check key permissions:
 
 ```bash
-sudo find /srv/public-share \
-    -type d \
-    -exec chmod 2770 {} +
+sudo stat /home/webmaster \
+  /home/webmaster/.ssh \
+  /home/webmaster/.ssh/authorized_keys
+
+sudo chown -R webmaster:webmaster /home/webmaster/.ssh
+sudo chmod 0700 /home/webmaster/.ssh
+sudo chmod 0600 /home/webmaster/.ssh/authorized_keys
 ```
 
-Set file permissions separately:
+## 16. Restrict `webmaster` to SFTP only
+
+The global SSH allowlist must include both required identities:
+
+```text
+AllowUsers sysadmin webmaster
+```
+
+Use a `Match` block for `webmaster`:
+
+```text
+Match User webmaster
+    ForceCommand internal-sftp
+    PermitTTY no
+    X11Forwarding no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    GatewayPorts no
+    PasswordAuthentication no
+```
+
+Validate:
 
 ```bash
-sudo find /srv/public-share \
-    -type f \
-    -exec chmod 0660 {} +
+sudo sshd -t
 ```
 
-Example share configuration:
+Reload only if validation succeeds:
 
-```ini
-[public-lab]
-    path = /srv/public-share
-    browseable = yes
-    guest ok = no
-    read only = no
-    valid users = @fileshare
-    force group = fileshare
-    create mask = 0660
-    directory mask = 2770
+```bash
+sudo systemctl reload ssh
+```
+
+Positive SFTP test:
+
+```bash
+sftp webmaster@portal.fav.it
+```
+
+Negative shell test:
+
+```bash
+ssh webmaster@portal.fav.it
+ssh webmaster@portal.fav.it id
+```
+
+The account should not receive a normal shell.
+
+Negative password-only SFTP test:
+
+```bash
+sftp -o PubkeyAuthentication=no webmaster@portal.fav.it
+```
+
+## 17. Optional stronger SFTP confinement with chroot
+
+First determine the **actual** portal path. Suppose only as an example it is `/var/www/portal`.
+
+The chroot root itself must not be writable by `webmaster`:
+
+```bash
+sudo chown root:root /var/www
+sudo chmod 0755 /var/www
+```
+
+Example Match block:
+
+```text
+Match User webmaster
+    ChrootDirectory /var/www
+    ForceCommand internal-sftp -d /portal
+    PermitTTY no
+    X11Forwarding no
+    AllowTcpForwarding no
+    AllowAgentForwarding no
+    PasswordAuthentication no
 ```
 
 Validate and reload:
 
 ```bash
-sudo testparm -s
-sudo systemctl reload smbd
+sudo sshd -t
+sudo systemctl reload ssh
 ```
 
-Positive test:
+Do not use this exact path unless it matches the discovered DocumentRoot layout.
+
+## 18. Create a controlled portal-content permission model
+
+Create a dedicated group:
 
 ```bash
-smbclient //localhost/public-lab -U operator
+sudo groupadd -f webcontent
+sudo usermod -aG webcontent webmaster
+sudo usermod -aG webcontent www-data
 ```
 
-Negative guest test:
+Verify:
 
 ```bash
-smbclient //localhost/public-lab -N
+id webmaster
+id www-data
 ```
 
-Guest access should fail.
+Set the real portal root first, for example:
 
-## 15. Audit filesystem permissions
+```bash
+PORTAL_ROOT=/var/www/portal
+```
 
-Find world-writable directories:
+Then:
+
+```bash
+sudo chown -R webmaster:webcontent "$PORTAL_ROOT"
+sudo find "$PORTAL_ROOT" -type d -exec chmod 2750 {} +
+sudo find "$PORTAL_ROOT" -type f -exec chmod 0640 {} +
+```
+
+If the application needs writable runtime directories, grant write access only to those specific directories rather than to the whole application tree.
+
+If `www-data` was newly added to a group, restart the active web server so new worker processes receive the new supplementary group:
+
+```bash
+sudo systemctl restart nginx
+```
+
+or:
+
+```bash
+sudo systemctl restart apache2
+```
+
+Verify the portal again:
+
+```bash
+curl -kI https://portal.fav.it/
+```
+
+## 19. Harden the global SSH policy
+
+Inspect current values:
+
+```bash
+sudo sshd -T | grep -E \
+'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication'
+```
+
+Inspect drop-ins:
+
+```bash
+ls -la /etc/ssh/sshd_config.d/
+```
+
+A suitable global policy is:
+
+```text
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitEmptyPasswords no
+X11Forwarding no
+AllowTcpForwarding no
+GatewayPorts no
+MaxAuthTries 3
+LoginGraceTime 30
+AllowUsers sysadmin webmaster
+```
+
+Remember that the `webmaster` Match block further restricts that account.
+
+Validate:
+
+```bash
+sudo sshd -t
+sudo sshd -T
+```
+
+Reload:
+
+```bash
+sudo systemctl reload ssh
+```
+
+Test required and prohibited behavior:
+
+```bash
+ssh sysadmin@portal.fav.it
+ssh root@portal.fav.it
+ssh -o PubkeyAuthentication=no sysadmin@portal.fav.it
+sftp webmaster@portal.fav.it
+ssh webmaster@portal.fav.it
+```
+
+Expected:
+
+- `sysadmin` key-based SSH works;
+- root SSH fails;
+- password-only `sysadmin` authentication fails;
+- `webmaster` SFTP works;
+- `webmaster` normal shell does not.
+
+For user-specific effective SSH configuration:
+
+```bash
+sudo sshd -T \
+  -C user=webmaster,host=portal.fav.it,addr=<DEVELOPER_IP> \
+  | grep -E \
+  'forcecommand|chrootdirectory|passwordauthentication|pubkeyauthentication|x11forwarding|allowtcpforwarding|permittty'
+```
+
+And for `sysadmin`:
+
+```bash
+sudo sshd -T \
+  -C user=sysadmin,host=portal.fav.it,addr=<ADMIN_IP>
+```
+
+## 20. Remove obsolete file-transfer services
+
+Check sockets:
+
+```bash
+sudo ss -lntup | grep -E ':(20|21|69)\b'
+```
+
+Check packages:
+
+```bash
+dpkg -l | grep -Ei 'vsftpd|proftpd|pure-ftpd|tftpd'
+```
+
+Check running services:
+
+```bash
+systemctl --type=service --state=running \
+  | grep -Ei 'vsftpd|proftpd|pure-ftpd|tftp'
+```
+
+If `vsftpd` is actually present and unnecessary:
+
+```bash
+sudo systemctl disable --now vsftpd
+sudo apt purge vsftpd
+```
+
+Remove only services/packages you actually discover and confirm are unnecessary.
+
+Verify:
+
+```bash
+sudo ss -lntup | grep -E ':(20|21|69)\b'
+```
+
+SFTP remains on TCP/22 through OpenSSH.
+
+## 21. Audit other unnecessary services and persistence mechanisms
+
+```bash
+ss -lntup
+systemctl --type=service --state=running
+systemctl list-unit-files --state=enabled
+systemctl list-timers --all
+sudo crontab -l
+sudo ls -la /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly /etc/cron.monthly
+sudo find /etc/systemd/system -type f -ls
+sudo grep -Rni 'ExecStart\|ExecStartPre\|ExecStartPost' /etc/systemd/system
+```
+
+For every component ask whether it is required by the portal role. Disable/remove only after establishing that it is unnecessary.
+
+## 22. Audit dangerous filesystem permissions and privilege mechanisms
+
+World-writable directories:
 
 ```bash
 sudo find / -xdev -type d -perm -0002 2>/dev/null
 ```
 
-Find world-writable files:
+World-writable files:
 
 ```bash
 sudo find / -xdev -type f -perm -0002 2>/dev/null
 ```
 
-Do not blindly modify every result. `/tmp` and `/var/tmp`, for example, are expected to be writable and normally rely on the sticky bit.
+Do not blindly change `/tmp` or `/var/tmp`; they are expected to be writable and normally protected by the sticky bit.
 
-Inspect a directory and its contents:
-
-```bash
-ls -ld /srv/company-share
-ls -l /srv/company-share
-stat /srv/company-share
-```
-
-For a generic protected share:
+SUID/SGID files:
 
 ```bash
-sudo chown -R root:sysadmin /srv/company-share
-sudo find /srv/company-share -type d -exec chmod 0750 {} +
-sudo find /srv/company-share -type f -exec chmod 0640 {} +
+sudo find / \
+  -xdev -type f \
+  \( -perm -4000 -o -perm -2000 \) \
+  -ls 2>/dev/null
 ```
 
-## 16. Audit privileged cron jobs
-
-Inspect the script and job definition:
+Linux capabilities:
 
 ```bash
-ls -l /opt/labapp/bin/maintenance.sh
-sudo cat /etc/cron.d/lab-maintenance
+sudo getcap -r / 2>/dev/null
 ```
 
-If root executes a world-writable script, an ordinary user may be able to modify code that root later runs.
+Investigate unexpected/custom entries instead of stripping privileges indiscriminately.
 
-Fix ownership and permissions:
-
-```bash
-sudo chown root:root /opt/labapp/bin/maintenance.sh
-sudo chmod 0750 /opt/labapp/bin/maintenance.sh
-```
-
-Also inspect every parent directory:
-
-```bash
-namei -l /opt/labapp/bin/maintenance.sh
-```
-
-If the scheduled job is unnecessary:
-
-```bash
-sudo rm -f /etc/cron.d/lab-maintenance
-```
-
-Audit scheduled jobs generally:
-
-```bash
-sudo ls -la /etc/cron.d
-sudo ls -la /etc/cron.daily
-sudo systemctl status cron
-```
-
-## 17. Search for misplaced secrets
-
-A simple educational search is:
+## 23. Search for obvious exposed secrets
 
 ```bash
 sudo grep -RniE \
-'password|token|secret|key' \
-/home /opt/labapp /srv/public-share \
-2>/dev/null
+  'password|token|secret|key' \
+  /home /opt /var/www \
+  2>/dev/null
 ```
 
-This is not a complete secret scanner and can produce false positives.
+This is a rough educational check and can produce false positives. If a real credential has been exposed, remove the exposed copy **and rotate/revoke the credential**.
 
-Protect a private directory:
+## 24. Configure nftables for the actual role
 
-```bash
-sudo install -d -m 0700 -o sysadmin -g sysadmin \
-    /home/sysadmin/private
+The final externally required TCP ports are:
+
+```text
+22  SSH + SFTP
+80  HTTP redirect only
+443 HTTPS portal
 ```
 
-Move and restrict a note:
-
-```bash
-sudo mv /home/sysadmin/notes.txt /home/sysadmin/private/
-sudo chmod 0600 /home/sysadmin/private/notes.txt
-```
-
-If a real password or token was exposed, deleting the file is not enough: revoke or rotate the credential as well.
-
-## 18. Configure nftables
-
-Inspect the current state:
-
-```bash
-sudo nft list ruleset
-systemctl status nftables
-```
-
-Edit:
-
-```bash
-sudo nano /etc/nftables.conf
-```
-
-Example simple-server ruleset:
+A simple baseline ruleset is:
 
 ```nft
 #!/usr/sbin/nft -f
-
 flush ruleset
 
 table inet filter {
@@ -642,14 +792,12 @@ table inet filter {
         iifname "lo" accept
         ct state established,related accept
         ct state invalid drop
-
         ip protocol icmp accept
         ip6 nexthdr ipv6-icmp accept
 
         tcp dport 22 accept
-
-        # Keep only if HTTP is required
         tcp dport 80 accept
+        tcp dport 443 accept
     }
 
     chain forward {
@@ -664,31 +812,33 @@ table inet filter {
 }
 ```
 
-Where possible, restrict SSH to the management subnet:
+Where topology permits, restrict TCP/22 by source. Remember that both administrators **and developers** need TCP/22:
 
 ```nft
-ip saddr 192.168.1.0/24 tcp dport 22 accept
+ip saddr <ADMIN_SUBNET> tcp dport 22 accept
+ip saddr <DEVELOPER_SUBNET> tcp dport 22 accept
 ```
 
-For Samba, restrict SMB to the authorized LAN:
-
-```nft
-ip saddr 10.10.10.0/24 tcp dport 445 accept
-```
-
-Validate syntax before loading:
+Validate before applying:
 
 ```bash
 sudo nft -c -f /etc/nftables.conf
 ```
 
-Keep the current SSH session open and, preferably, console access available. Apply:
+Keep the old SSH session open, then apply:
 
 ```bash
 sudo nft -f /etc/nftables.conf
 ```
 
-Immediately test a new SSH connection. If it succeeds, enable persistence:
+Immediately test a new admin session and SFTP session:
+
+```bash
+ssh sysadmin@portal.fav.it
+sftp webmaster@portal.fav.it
+```
+
+Then enable persistence:
 
 ```bash
 sudo systemctl enable --now nftables
@@ -701,7 +851,7 @@ sudo nft list ruleset
 systemctl status nftables
 ```
 
-## 19. Enable and verify AppArmor
+## 25. AppArmor
 
 ```bash
 systemctl status apparmor
@@ -728,24 +878,22 @@ systemctl is-active apparmor
 sudo aa-status
 ```
 
-If a relevant profile is in complain mode and has been tested adequately:
+Move a tested relevant profile to enforce mode only when appropriate:
 
 ```bash
 sudo aa-enforce /etc/apparmor.d/<profile>
 ```
 
-After each policy change:
+After policy changes:
 
 ```bash
 systemctl status <service>
 journalctl -u <service>
 ```
 
-Do not blindly enforce every profile.
+## 26. Selected sysctl hardening
 
-## 20. Harden selected sysctl parameters
-
-Inspect current values:
+Inspect:
 
 ```bash
 sysctl net.ipv4.ip_forward
@@ -764,28 +912,18 @@ sysctl fs.protected_hardlinks
 sysctl fs.protected_symlinks
 ```
 
-For a simple, single-homed, non-routing server, create:
-
-```bash
-sudo nano /etc/sysctl.d/99-hardening.conf
-```
-
-Suggested contents:
+For a simple single-homed non-routing server, `/etc/sysctl.d/99-hardening.conf` can contain:
 
 ```text
 net.ipv4.ip_forward = 0
-
 net.ipv4.conf.all.accept_redirects = 0
 net.ipv4.conf.default.accept_redirects = 0
 net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
-
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
-
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
-
 net.ipv4.tcp_syncookies = 1
 kernel.dmesg_restrict = 1
 kernel.kptr_restrict = 2
@@ -799,31 +937,18 @@ Apply:
 sudo sysctl --system
 ```
 
-Strict `rp_filter=1` is role-dependent and may be inappropriate for multihomed hosts, asymmetric routing, VPNs, or policy routing.
+Do not blindly use strict `rp_filter=1` on multihomed, VPN, asymmetric-routing or policy-routing systems.
 
-## 21. Make journald persistent
+## 27. Persistent logging
 
-Inspect existing journal state:
+Inspect:
 
 ```bash
 journalctl --list-boots
 systemd-analyze cat-config systemd/journald.conf
 ```
 
-Remove the deliberately insecure lab override if present:
-
-```bash
-sudo rm -f /etc/systemd/journald.conf.d/90-lab-insecure.conf
-sudo rm -f /etc/systemd/journald.conf.d/90-lab-insecure-fileserver.conf
-```
-
-Create:
-
-```bash
-sudo nano /etc/systemd/journald.conf.d/90-persistent.conf
-```
-
-Contents:
+Configure persistent storage with a drop-in such as:
 
 ```ini
 [Journal]
@@ -831,7 +956,7 @@ Storage=persistent
 Compress=yes
 ```
 
-Create the persistent storage directory and restart journald:
+Create storage and restart journald:
 
 ```bash
 sudo mkdir -p /var/log/journal
@@ -843,29 +968,16 @@ Verify:
 ```bash
 journalctl --disk-usage
 journalctl --list-boots
-```
-
-After a controlled reboot, verify that previous boots remain visible.
-
-Inspect relevant services:
-
-```bash
 journalctl -u ssh
 journalctl -u nftables
 journalctl -u apparmor
-```
-
-On the file server also:
-
-```bash
-journalctl -u smbd
+journalctl -u nginx
 journalctl -u apache2
-journalctl -u cron
 ```
 
-## 22. Configure automatic updates
+Check only the relevant web-server unit.
 
-Check package and timers:
+## 28. Automatic updates
 
 ```bash
 dpkg -l unattended-upgrades
@@ -873,31 +985,17 @@ systemctl status apt-daily.timer
 systemctl status apt-daily-upgrade.timer
 ```
 
-Install if necessary:
+Install if missing:
 
 ```bash
 sudo apt install unattended-upgrades
 ```
 
-Unmask timers if necessary:
-
-```bash
-sudo systemctl unmask apt-daily.timer 2>/dev/null || true
-sudo systemctl unmask apt-daily-upgrade.timer 2>/dev/null || true
-```
-
-Enable them:
+Enable timers:
 
 ```bash
 sudo systemctl enable --now apt-daily.timer
 sudo systemctl enable --now apt-daily-upgrade.timer
-```
-
-Configure `/etc/apt/apt.conf.d/20auto-upgrades`:
-
-```text
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
 ```
 
 Verify:
@@ -907,117 +1005,107 @@ systemctl list-timers | grep apt
 sudo unattended-upgrade --dry-run --debug
 ```
 
-## 23. Perform final verification
+Review `/etc/apt/apt.conf.d/50unattended-upgrades` as well as `20auto-upgrades` so you know what origins/packages the unattended policy actually covers.
 
-Check listeners and services:
+## 29. Final functional and security verification
+
+Hostname:
 
 ```bash
-ss -lntup
-systemctl --type=service --state=running
+hostname -f
 ```
 
-Validate SSH:
+Listeners:
+
+```bash
+sudo ss -lntup
+```
+
+SSH syntax:
 
 ```bash
 sudo sshd -t
-sudo sshd -T | grep -E \
-'permitrootlogin|passwordauthentication|kbdinteractiveauthentication|pubkeyauthentication|maxauthtries|x11forwarding|allowtcpforwarding|gatewayports'
 ```
 
-Validate Samba where applicable:
-
-```bash
-sudo testparm -s
-smbclient //localhost/public-lab -U operator
-smbclient //localhost/public-lab -N
-```
-
-Validate web server where applicable:
-
-```bash
-sudo nginx -t
-sudo apache2ctl configtest
-```
-
-Validate firewall:
+Firewall:
 
 ```bash
 sudo nft list ruleset
 ```
 
-Validate AppArmor:
+HTTP redirect:
 
 ```bash
-sudo aa-status
+curl -sSI http://portal.fav.it/
 ```
 
-Validate sysctl values:
+HTTPS portal:
 
 ```bash
-sysctl net.ipv4.ip_forward
-sysctl net.ipv4.conf.all.accept_redirects
-sysctl net.ipv4.conf.all.accept_source_route
-sysctl net.ipv4.conf.all.rp_filter
-sysctl net.ipv4.tcp_syncookies
-sysctl kernel.dmesg_restrict
-sysctl kernel.kptr_restrict
-sysctl fs.protected_hardlinks
-sysctl fs.protected_symlinks
+curl -kI https://portal.fav.it/
 ```
 
-## 24. Run the final external scan
+Admin SSH:
 
 ```bash
-sudo nmap -sS -sV 10.10.10.20 -oN nmap-after.txt
+ssh sysadmin@portal.fav.it
 ```
 
-or:
+SFTP:
 
 ```bash
-sudo nmap -sS -sV 10.10.10.30 -oN nmap-after.txt
+sftp webmaster@portal.fav.it
 ```
 
-Compare the before and after scans. The intended result is that only services justified by the machine's role remain reachable.
-
-## 25. Save the after-state
+Negative tests:
 
 ```bash
-mkdir -p ~/assessment-after
-
-ss -lntup > ~/assessment-after/ss.txt
-systemctl --type=service --state=running \
-    > ~/assessment-after/services.txt
-sudo nft list ruleset \
-    > ~/assessment-after/nftables.txt
-sudo sshd -T \
-    > ~/assessment-after/sshd-effective.txt
-sudo aa-status \
-    > ~/assessment-after/apparmor.txt 2>&1
+ssh root@portal.fav.it
+ssh -o PubkeyAuthentication=no sysadmin@portal.fav.it
+ssh webmaster@portal.fav.it
+sftp -o PubkeyAuthentication=no webmaster@portal.fav.it
 ```
 
-For Samba:
+External scan:
 
 ```bash
-sudo testparm -s \
-    > ~/assessment-after/samba.txt
+sudo nmap -sS -sV -p- portal.fav.it -oN nmap-after.txt
 ```
 
-The before/after evidence is part of the hardening process: it shows what changed and makes the work auditable.
-
-## Final principle
-
-For every component:
+Expected final externally required TCP exposure:
 
 ```text
-Needed?
-  |
-  +-- No  → remove or disable
-  |
-  +-- Yes → minimize privileges
-            minimize exposure
-            use restrictive policy
-            log relevant events
-            verify the result
+22/tcp   SSH/SFTP
+80/tcp   HTTP redirect only
+443/tcp  HTTPS
 ```
 
-Hardening is not one setting. It is a layered reduction of unnecessary trust, privilege, and exposure.
+Any additional listener needs an explicit role justification.
+
+## 30. Capture the after-state
+
+```bash
+ss -lntup | tee ~/hardening-evidence/after/listening-sockets.txt
+systemctl --type=service --state=running \
+  | tee ~/hardening-evidence/after/running-services.txt
+sudo nft list ruleset \
+  | tee ~/hardening-evidence/after/nftables.txt
+sudo sshd -T \
+  | tee ~/hardening-evidence/after/sshd-effective.txt
+sudo aa-status 2>&1 \
+  | tee ~/hardening-evidence/after/apparmor.txt
+```
+
+Use the [evidence template](evidence-template.md) for each finding so the final report demonstrates:
+
+```text
+CHECK + OUTPUT
+      ↓
+WHY IT IS A RISK / WHY IT IS UNNECESSARY
+      ↓
+REMEDIATION
+      ↓
+VERIFICATION
+      ↓
+REQUIRED SERVICE STILL WORKS
+```
